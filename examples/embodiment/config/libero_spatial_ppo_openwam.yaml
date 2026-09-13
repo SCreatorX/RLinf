@@ -1,10 +1,10 @@
 defaults:
   - env/libero_spatial@env.train
   - env/libero_spatial@env.eval
-  - model/openwam@actor.model
   - hybrid_engines/fsdp@actor.fsdp_config
   - weight_syncer/patch_syncer@weight_syncer
   - override hydra/job_logging: stdout
+  - _self_
 
 hydra:
   run:
@@ -98,9 +98,10 @@ rollout:
   pipeline_stage_num: 1
 
   model:
-    model_path: "/mnt/data/wangyuran/openwam_checkpoints/openwam-libero-sft-30000"
-    precision: ${actor.model.precision}
     model_type: "openwam"
+    model_path: "/mnt/data/wangyuran/openwam_checkpoints/openwam-libero-sft-30000"
+    precision: bf16
+    device: cuda
     num_frames: 33
     denoise_steps: 4
 
@@ -114,8 +115,12 @@ actor:
 
   # Override the default values in model/pi0_5
   model:
-    model_path: "/mnt/data/wangyuran/openwam_checkpoints/openwam-libero-sft-30000"
     model_type: "openwam"
+    model_path: "/mnt/data/wangyuran/openwam_checkpoints/openwam-libero-sft-30000"
+    precision: bf16
+    device: cuda
+    num_frames: 33
+    denoise_steps: 4
     num_action_chunks: 32 # generated actions = num_frames - 1
     num_frames: 33
     denoise_steps: 4
