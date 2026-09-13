@@ -117,21 +117,25 @@ class OpenWAMPolicy(nn.Module, BasePolicy):
         action_t, action_next = chains[rows, chosen], chains[rows, chosen + 1]
         native = {k[len("native__"):]: v for k, v in forward_inputs.items() if k.startswith("native__")}
         native["latents"] = forward_inputs["video_latents"]
+        proprio = native.pop("proprio", None)
         _, a_pred = self.architecture.forward(action_t, forward_inputs["action_timesteps"],
-                                               **native, timestep=forward_inputs["video_timesteps"])
+                                               proprio=proprio, **native,
+                                               timestep=forward_inputs["video_timesteps"])
         sigma, sigma_next = forward_inputs["sigma"], forward_inputs["sigma_next"]
         mean = action_t + a_pred * (sigma_next - sigma).view(-1, 1, 1)
         std = forward_inputs["noise_std"].view(-1, 1, 1).clamp_min(1e-6)
-        dim = int(forward_inputs["env_action_dim"][0].item())
+        active = forward_inputs["active_action_indices"].long()
         if compute_logprobs:
-            logprobs = (-0.5 * ((action_next - mean) / std).square()
-                        - torch.log(std) - 0.5 * np.log(2.0 * np.pi))[:, :, :dim]
+            all_logprobs = (-0.5 * ((action_next - mean) / std).square()
+                            - torch.log(std) - 0.5 * np.log(2.0 * np.pi))
+            logprobs = all_logprobs.index_select(-1, active)
         else:
-            logprobs = torch.zeros_like(action_next[:, :, :dim])
-        values = self.value_head(self._value_features(forward_inputs, action_t)).squeeze(-1)
+            logprobs = torch.zeros(action_next.shape[0], action_next.shape[1], active.numel(), device=action_next.device)
+        features = self._value_features(forward_inputs, action_t).to(next(self.value_head.parameters()).dtype)
+        values = self.value_head(features).squeeze(-1)
         if not compute_values:
             values = torch.zeros(chains.shape[0], device=chains.device)
-        entropy = (-torch.log(std) - 0.5 * np.log(2.0 * np.pi)).expand_as(logprobs) if compute_entropy else None
+        entropy = (torch.log(std) + 0.5 * np.log(2.0 * np.pi * np.e)).expand_as(logprobs) if compute_entropy else None
         return {"logprobs": logprobs.float(), "values": values.float(), "entropy": entropy}
 
     @staticmethod
@@ -210,7 +214,7 @@ class OpenWAMPolicy(nn.Module, BasePolicy):
     def _predict_rl_batch(self, env_obs):
         """Collect a native joint-flow chain for PPO."""
         batch_size = _infer_batch_size(env_obs)
-        records, outputs, prev_logprobs = [], [], []
+        records, outputs = [], []
         steps = max(2, self.denoise_steps)
         parameter = next(self.architecture.parameters())
         device, dtype = parameter.device, parameter.dtype
@@ -231,16 +235,25 @@ class OpenWAMPolicy(nn.Module, BasePolicy):
                 native["proprio"] = self.architecture.normalize_deploy_proprio(proprio).to(device=device, dtype=dtype)
             video = native["latents"]
             action = torch.randn(1, max(1, self.num_frames - 1), action_dim, device=device, dtype=dtype)
-            chosen = int(torch.randint(0, steps - 1, ()).item())
+            from openwam.deploy.denoise_schedule import make_schedule
+            schedule = make_schedule("sync", self.architecture.video_scheduler,
+                                     self.architecture.action_scheduler, num_steps=steps, shift=5.0)
+            chosen = int(torch.randint(0, len(schedule) - 1, ()).item())
             chains = [action]
             selected_video = selected_sigma = selected_next = selected_std = selected_mean = None
-            for step in range(steps - 1):
-                sigma = torch.tensor([1.0 - step / (steps - 1)], device=device, dtype=dtype)
-                sigma_next = torch.tensor([1.0 - (step + 1) / (steps - 1)], device=device, dtype=dtype)
-                vp, ap = self.architecture.forward(action, sigma * 1000.0, **native, timestep=sigma * 1000.0)
+            for step, ((tv, ta), (tv_next, ta_next)) in enumerate(zip(schedule[:-1], schedule[1:])):
+                sigma = torch.tensor([ta / self.architecture.action_scheduler.num_train_timesteps], device=device, dtype=dtype)
+                sigma_next = torch.tensor([ta_next / self.architecture.action_scheduler.num_train_timesteps], device=device, dtype=dtype)
+                video_sigma = torch.tensor([tv / self.architecture.video_scheduler.num_train_timesteps], device=device, dtype=dtype)
+                video_sigma_next = torch.tensor([tv_next / self.architecture.video_scheduler.num_train_timesteps], device=device, dtype=dtype)
+                native_pipeline = dict(native)
+                proprio_native = native_pipeline.pop("proprio", None)
+                vp, ap = self.architecture.forward(action, torch.tensor([ta], device=device, dtype=dtype),
+                                                   proprio=proprio_native, **native_pipeline,
+                                                   timestep=torch.tensor([tv], device=device, dtype=dtype))
                 if step == chosen:
                     selected_video = native["latents"].detach().clone()
-                video = video + vp * (sigma_next - sigma)
+                video = video + vp * (video_sigma_next - video_sigma)
                 native["latents"] = video
                 mean = action + ap * (sigma_next - sigma).view(1, 1, 1)
                 noise_std = torch.sqrt((sigma - sigma_next).clamp_min(1e-6)) * 0.05
@@ -256,25 +269,23 @@ class OpenWAMPolicy(nn.Module, BasePolicy):
                     "video_latents": selected_video.squeeze(0).contiguous(), "sigma": selected_sigma,
                     "sigma_next": selected_next, "noise_std": selected_std,
                     "video_timesteps": selected_sigma * 1000.0, "action_timesteps": selected_sigma * 1000.0,
-                    "env_action_dim": torch.tensor([action_dim], device=device, dtype=torch.long),
+                    "active_action_indices": torch.as_tensor(getattr(getattr(self.architecture, "normalizer", None), "_dst_index", list(range(action_dim))), device=device, dtype=torch.long),
                     "model_action": action.squeeze(0).reshape(-1).float()}
             physical = action.squeeze(0).float().cpu().numpy()
             normalizer = getattr(self.architecture, "normalizer", None)
             if normalizer is not None:
                 physical = normalizer.unnormalize(physical)
             flat["action"] = torch.as_tensor(physical, device=device).reshape(-1).float()
-            prev_logprobs.append((-0.5 * ((action - selected_mean) / selected_std).square()
-                                  - torch.log(selected_std) - 0.5 * np.log(2.0 * np.pi)
-                                  ).squeeze(0).float())
             for key, value in native.items():
                 if isinstance(value, torch.Tensor) and value.ndim > 0 and value.shape[0] == 1:
                     flat[f"native__{key}"] = value.contiguous()
             records.append(flat)
             outputs.append(torch.as_tensor(physical, device=device, dtype=torch.float32))
-        prev = torch.stack(prev_logprobs, dim=0)
-        return torch.stack(outputs), {"prev_logprobs": prev,
-                                     "prev_values": torch.zeros(batch_size, 1, device=device),
-                                     "forward_inputs": _stack_flat_records(records)}
+        forward_inputs = _stack_flat_records(records)
+        scored = self.rl_forward(forward_inputs, compute_values=True)
+        return torch.stack(outputs), {"prev_logprobs": scored["logprobs"].detach(),
+                                     "prev_values": scored["values"].detach().unsqueeze(-1),
+                                     "forward_inputs": forward_inputs}
 
 
 @contextmanager
