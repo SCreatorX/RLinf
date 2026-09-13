@@ -936,6 +936,20 @@ def validate_embodied_cfg(cfg):
         f"Supported embodied models: {sorted([x.value for x in EMBODIED_MODEL])}; "
         f"supported diffusion models: {sorted([x.value for x in DIFFUSION_MODELS])}."
     )
+    if not only_eval and model_type == SupportedModel.OPENWAM:
+        assert int(model_cfg.get("num_frames", 0)) >= 3, (
+            "OpenWAM PPO requires actor.model.num_frames >= 3."
+        )
+        assert int(model_cfg.get("denoise_steps", 0)) >= 2, (
+            "OpenWAM PPO requires actor.model.denoise_steps >= 2."
+        )
+        assert int(model_cfg.get("num_action_chunks", 0)) == int(model_cfg.num_frames) - 1, (
+            "OpenWAM PPO requires num_action_chunks == num_frames - 1."
+        )
+        assert cfg.rollout.get("return_logprobs", False), (
+            "OpenWAM PPO requires rollout.return_logprobs=True."
+        )
+
     if not only_eval and algorithm_cfg.get("recompute_logprobs", False):
         # The actor-side recompute reshapes logprobs by ``action_dim`` to report the
         # gap per action, which assumes the OpenVLA family's tokenized action layout.

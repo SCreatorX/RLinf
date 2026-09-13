@@ -34,7 +34,8 @@ class OpenWAMPolicy(nn.Module, BasePolicy):
     """RLinf adapter for OpenWAM inference and native SFT training."""
 
     def __init__(self, engine: Any, *, num_frames: int, height: int, width: int, denoise_steps: int,
-                 lambda_video: float = 1.0, lambda_action: float = 1.0):
+                 lambda_video: float = 1.0, lambda_action: float = 1.0,
+                 noise_std: float = 0.05):
         super().__init__()
         self.engine = engine
         self.num_frames = num_frames
@@ -43,6 +44,9 @@ class OpenWAMPolicy(nn.Module, BasePolicy):
         self.denoise_steps = denoise_steps
         self.lambda_video = float(lambda_video)
         self.lambda_action = float(lambda_action)
+        if noise_std <= 0:
+            raise ValueError(f"OpenWAM PPO noise_std must be positive, got {noise_std}")
+        self.noise_std = float(noise_std)
         self.architecture = engine.architecture
         engine_cfg = getattr(engine, "cfg", None)
         dataloader_cfg = getattr(engine_cfg, "dataloader", None)
@@ -59,7 +63,8 @@ class OpenWAMPolicy(nn.Module, BasePolicy):
                         torch_dtype: torch.dtype | None, num_frames: int, height: int,
                         width: int, denoise_steps: int, lambda_video: float = 1.0,
                         lambda_action: float = 1.0,
-                        encoder_model_path: str | None = None) -> "OpenWAMPolicy":
+                        encoder_model_path: str | None = None,
+                        noise_std: float = 0.05) -> "OpenWAMPolicy":
         """Build OpenWAM's checkpoint loader and joint inference engine."""
         from omegaconf import OmegaConf
         from openwam.deploy import JointInferenceEngine, load_from_checkpoint_dir
@@ -92,7 +97,7 @@ class OpenWAMPolicy(nn.Module, BasePolicy):
         model = cls(JointInferenceEngine(cfg=cfg, architecture=architecture),
                     num_frames=num_frames, height=height, width=width,
                     denoise_steps=denoise_steps, lambda_video=lambda_video,
-                    lambda_action=lambda_action)
+                    lambda_action=lambda_action, noise_std=noise_std)
         model.to(device=device, dtype=torch_dtype or next(architecture.parameters()).dtype)
         return model
 
@@ -124,6 +129,8 @@ class OpenWAMPolicy(nn.Module, BasePolicy):
         mean = action_t + a_pred * (sigma_next - sigma).view(-1, 1, 1)
         std = forward_inputs["noise_std"].view(-1, 1, 1).clamp_min(1e-6)
         active = forward_inputs["active_action_indices"][0].long()
+        if active.ndim != 1 or active.numel() == 0:
+            raise ValueError("OpenWAM PPO active_action_indices must be a non-empty vector")
         if compute_logprobs:
             all_logprobs = (-0.5 * ((action_next - mean) / std).square()
                             - torch.log(std) - 0.5 * np.log(2.0 * np.pi))
@@ -230,10 +237,13 @@ class OpenWAMPolicy(nn.Module, BasePolicy):
                                                 multiview=self._multiview, camera_layout=self._camera_layout,
                                                 height=self.height, width=self.width)
             proprio = _libero_state_to_eef10(_batch_value(env_obs, ("states", "state", "proprio"), index, None))
+            action_shift = getattr(self.architecture.action_backbone, "shift_action", None) or 5.0
+            video_shift = getattr(self.architecture.video_backbone, "shift_video", None) or action_shift
             native = self.architecture.video_backbone.preprocess_input_for_inference(
                 prompt=_batch_value(env_obs, ("task_descriptions", "task_description", "language"), index, ""),
                 first_frame_image=[image], num_frames=self.num_frames, height=self.height, width=self.width,
-                seed=42, num_inference_steps=steps, shift=5.0, tiled=True, cfg_scale=1.0, cfg_merge=False)
+                seed=42, num_inference_steps=steps, shift=float(video_shift), tiled=True,
+                cfg_scale=1.0, cfg_merge=False)
             native = {k: v.to(device=device, dtype=dtype) if isinstance(v, torch.Tensor) else v for k, v in native.items()}
             if getattr(self.architecture, "uses_proprioception", False):
                 native["proprio"] = self.architecture.normalize_deploy_proprio(proprio).to(device=device, dtype=dtype)
@@ -241,7 +251,8 @@ class OpenWAMPolicy(nn.Module, BasePolicy):
             action = torch.randn(1, max(1, self.num_frames - 1), action_dim, device=device, dtype=dtype)
             from openwam.deploy.denoise_schedule import make_schedule
             schedule = make_schedule("sync", self.architecture.video_scheduler,
-                                     self.architecture.action_scheduler, num_steps=steps, shift=5.0)
+                                     self.architecture.action_scheduler, num_steps=steps,
+                                     shift=float(action_shift), shift_video=float(video_shift))
             chosen = int(torch.randint(0, len(schedule) - 1, ()).item())
             chains = [action]
             selected_video = selected_sigma = selected_next = selected_std = None
@@ -260,7 +271,7 @@ class OpenWAMPolicy(nn.Module, BasePolicy):
                 video = video + vp * (video_sigma_next - video_sigma)
                 native["latents"] = video
                 mean = action + ap * (sigma_next - sigma).view(1, 1, 1)
-                noise_std = torch.sqrt((sigma - sigma_next).clamp_min(1e-6)) * 0.05
+                noise_std = torch.sqrt((sigma - sigma_next).clamp_min(1e-6)) * self.noise_std
                 if step == chosen:
                     selected_sigma, selected_next, selected_std = sigma.detach(), sigma_next.detach(), noise_std.detach()
                     action = mean + torch.randn_like(action) * noise_std
