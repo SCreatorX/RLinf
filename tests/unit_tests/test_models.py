@@ -33,13 +33,13 @@ from rlinf.algorithms.losses import compute_ppo_critic_loss
 from rlinf.config import SupportedModel
 from rlinf.hybrid_engines.fsdp.utils import get_fsdp_wrap_policy
 from rlinf.models import get_model, register_model
+from rlinf.models.embodiment.modules.rlt_token_transformer import (
+    RLTTokenTransformer,
+)
 from rlinf.models.embodiment.openwam.openwam_policy import (
     _batch_value,
     _infer_batch_size,
     _to_pil,
-)
-from rlinf.models.embodiment.modules.rlt_token_transformer import (
-    RLTTokenTransformer,
 )
 from rlinf.utils.env_helpers import HistoryManager
 from rlinf.utils.env_helpers.delay_sampler import (
