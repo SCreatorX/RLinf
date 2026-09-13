@@ -36,6 +36,8 @@ def get_model(cfg: DictConfig, torch_dtype: torch.dtype | None = None) -> OpenWA
         height=int(cfg.get("height", 384)),
         width=int(cfg.get("width", 320)),
         denoise_steps=int(cfg.get("denoise_steps", 10)),
+        lambda_video=float(cfg.get("lambda_video", 1.0)),
+        lambda_action=float(cfg.get("lambda_action", 1.0)),
     )
 
 

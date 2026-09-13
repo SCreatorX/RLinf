@@ -23,30 +23,29 @@ import torch
 import torch.nn as nn
 from PIL import Image
 
-from rlinf.models.embodiment.base_policy import BasePolicy
+from rlinf.models.embodiment.base_policy import BasePolicy, ForwardType
 
 
 class OpenWAMPolicy(nn.Module, BasePolicy):
-    """Batch adapter for OpenWAM checkpoint-first inference.
+    """RLinf adapter for OpenWAM inference and native SFT training."""
 
-    This first milestone supports evaluation only. PPO log-probabilities and
-    the IDM cached action path are added after the LIBERO observation/action
-    contract is validated.
-    """
-
-    def __init__(self, engine: Any, *, num_frames: int, height: int, width: int, denoise_steps: int):
+    def __init__(self, engine: Any, *, num_frames: int, height: int, width: int, denoise_steps: int,
+                 lambda_video: float = 1.0, lambda_action: float = 1.0):
         super().__init__()
         self.engine = engine
         self.num_frames = num_frames
         self.height = height
         self.width = width
         self.denoise_steps = denoise_steps
+        self.lambda_video = float(lambda_video)
+        self.lambda_action = float(lambda_action)
         self.architecture = engine.architecture
 
     @classmethod
     def from_checkpoint(cls, model_path: str, *, ckpt_name: str | None, device: str,
                         torch_dtype: torch.dtype | None, num_frames: int, height: int,
-                        width: int, denoise_steps: int) -> "OpenWAMPolicy":
+                        width: int, denoise_steps: int, lambda_video: float = 1.0,
+                        lambda_action: float = 1.0) -> "OpenWAMPolicy":
         """Build OpenWAM's checkpoint loader and joint inference engine."""
         from omegaconf import OmegaConf
         from openwam.deploy import JointInferenceEngine, load_from_checkpoint_dir
@@ -58,15 +57,55 @@ class OpenWAMPolicy(nn.Module, BasePolicy):
         cfg.inference.denoise_steps = denoise_steps
         cfg.inference.height = height
         cfg.inference.width = width
+        training_cfg = OmegaConf.select(cfg, "training", default={})
+        architecture.init_training_schedulers(1000)
+        architecture.set_training_runtime(
+            use_gradient_checkpointing=bool(OmegaConf.select(training_cfg, "use_gradient_checkpointing", default=False)),
+            use_gradient_checkpointing_offload=bool(OmegaConf.select(training_cfg, "use_gradient_checkpointing_offload", default=False)),
+            max_timestep_boundary=float(OmegaConf.select(training_cfg, "max_timestep_boundary", default=1.0)),
+            min_timestep_boundary=float(OmegaConf.select(training_cfg, "min_timestep_boundary", default=0.0)),
+        )
         model = cls(JointInferenceEngine(cfg=cfg, architecture=architecture),
                     num_frames=num_frames, height=height, width=width,
-                    denoise_steps=denoise_steps)
+                    denoise_steps=denoise_steps, lambda_video=lambda_video,
+                    lambda_action=lambda_action)
         if torch_dtype is not None:
             model.to(dtype=torch_dtype)
         return model
 
+    def forward(self, forward_type: ForwardType = ForwardType.DEFAULT, **kwargs):
+        if forward_type == ForwardType.SFT or (forward_type == ForwardType.DEFAULT and "data" in kwargs):
+            return self.sft_forward(**kwargs)
+        return self.default_forward(**kwargs)
+
     def default_forward(self, **kwargs):
-        raise NotImplementedError("OpenWAM Phase 1 supports evaluation only; RL default_forward is Phase 3.")
+        if "data" in kwargs:
+            return self.sft_forward(**kwargs)
+        raise NotImplementedError(
+            "OpenWAM default_forward requires SFT data; use predict_action_batch for rollout evaluation."
+        )
+
+    def sft_forward(self, data: Any = None, **kwargs) -> dict[str, torch.Tensor]:
+        """Compute OpenWAM's native joint video/action SFT loss."""
+        if data is None:
+            data = kwargs.get("batch")
+        if data is None:
+            raise ValueError("OpenWAM sft_forward requires `data` from the SFT dataloader.")
+        if isinstance(data, dict):
+            data = [data]
+        if not isinstance(data, (list, tuple)):
+            raise TypeError(f"OpenWAM SFT data must be a sample list, got {type(data)!r}")
+        inputs = self.architecture.prepare_inputs(list(data))
+        result = self.architecture.compute_loss(
+            **inputs,
+            lambda_video=float(kwargs.get("lambda_video", self.lambda_video)),
+            lambda_action=float(kwargs.get("lambda_action", self.lambda_action)),
+        )
+        return {
+            "loss": result["loss"],
+            "loss_video": result.get("loss_video", result["loss"].detach()),
+            "loss_action": result.get("loss_action", result["loss"].detach()),
+        }
 
     def predict_action_batch(self, env_obs: dict[str, Any], mode: str = "eval", **kwargs):
         """Generate one action chunk per observation in ``env_obs``."""

@@ -33,10 +33,12 @@ from rlinf.algorithms.losses import compute_ppo_critic_loss
 from rlinf.config import SupportedModel
 from rlinf.hybrid_engines.fsdp.utils import get_fsdp_wrap_policy
 from rlinf.models import get_model, register_model
+from rlinf.models.embodiment.base_policy import ForwardType
 from rlinf.models.embodiment.modules.rlt_token_transformer import (
     RLTTokenTransformer,
 )
 from rlinf.models.embodiment.openwam.openwam_policy import (
+    OpenWAMPolicy,
     _batch_value,
     _infer_batch_size,
     _to_pil,
@@ -84,6 +86,44 @@ def test_openwam_observation_adapter_smoke():
     assert _infer_batch_size(observations) == 2
     assert _batch_value(observations, ("states",), 1).shape == (7,)
     assert _to_pil(_batch_value(observations, ("main_images",), 0)).size == (16, 16)
+
+
+def test_openwam_sft_forward_delegates_native_loss():
+    class _Architecture(torch.nn.Module):
+        def __init__(self):
+            super().__init__()
+            self.weight = torch.nn.Parameter(torch.ones(()))
+            self.seen = None
+
+        def prepare_inputs(self, data):
+            self.seen = data
+            return {"marker": torch.tensor(1.0)}
+
+        def compute_loss(self, **kwargs):
+            assert kwargs["lambda_video"] == 0.25
+            assert kwargs["lambda_action"] == 0.75
+            return {
+                "loss": self.weight * 2,
+                "loss_video": self.weight.detach(),
+                "loss_action": self.weight.detach() * 3,
+            }
+
+    architecture = _Architecture()
+    engine = type("_Engine", (), {"architecture": architecture})()
+    policy = OpenWAMPolicy(
+        engine,
+        num_frames=33,
+        height=384,
+        width=320,
+        denoise_steps=10,
+        lambda_video=0.25,
+        lambda_action=0.75,
+    )
+    sample = {"video": [], "prompt": "pick"}
+    output = policy(forward_type=ForwardType.SFT, data=[sample])
+    assert output["loss"].requires_grad
+    assert architecture.seen == [sample]
+    assert output["loss_action"].item() == 3
 
 
 def test_custom_model_registration_smoke():
