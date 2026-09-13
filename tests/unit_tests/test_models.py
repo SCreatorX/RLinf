@@ -769,8 +769,8 @@ def test_openwam_rl_forward_rescores_and_backpropagates():
             super().__init__()
             self.weight = torch.nn.Parameter(torch.tensor(0.2))
 
-        def forward(self, action, timestep, proprio=None, **inputs):
-            del timestep, proprio
+        def forward(self, action, action_timestep, proprio=None, **inputs):
+            del action_timestep, proprio
             return torch.zeros_like(inputs["latents"]) + self.weight, action * 0 + self.weight
 
     engine = SimpleNamespace(
