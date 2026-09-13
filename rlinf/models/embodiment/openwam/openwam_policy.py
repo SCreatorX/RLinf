@@ -240,7 +240,7 @@ class OpenWAMPolicy(nn.Module, BasePolicy):
                                      self.architecture.action_scheduler, num_steps=steps, shift=5.0)
             chosen = int(torch.randint(0, len(schedule) - 1, ()).item())
             chains = [action]
-            selected_video = selected_sigma = selected_next = selected_std = selected_mean = None
+            selected_video = selected_sigma = selected_next = selected_std = None
             for step, ((tv, ta), (tv_next, ta_next)) in enumerate(zip(schedule[:-1], schedule[1:])):
                 sigma = torch.tensor([ta / self.architecture.action_scheduler.num_train_timesteps], device=device, dtype=dtype)
                 sigma_next = torch.tensor([ta_next / self.architecture.action_scheduler.num_train_timesteps], device=device, dtype=dtype)
@@ -259,7 +259,6 @@ class OpenWAMPolicy(nn.Module, BasePolicy):
                 noise_std = torch.sqrt((sigma - sigma_next).clamp_min(1e-6)) * 0.05
                 if step == chosen:
                     selected_sigma, selected_next, selected_std = sigma.detach(), sigma_next.detach(), noise_std.detach()
-                    selected_mean = mean.detach()
                     action = mean + torch.randn_like(action) * noise_std
                 else:
                     action = mean
