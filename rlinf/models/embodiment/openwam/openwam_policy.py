@@ -169,25 +169,40 @@ class OpenWAMPolicy(nn.Module, BasePolicy):
 def _checkpoint_with_encoder_override(
     model_path: str, encoder_model_path: str | None
 ) -> Iterator[str]:
-    """Yield a checkpoint directory with an optional external encoder override.
+    """Yield a checkpoint directory with deploy-time encoder fixes applied.
 
-    OpenWAM's native loader reads ``config.yaml`` before constructing the
-    architecture. A temporary staging directory rewrites only that path
-    without editing the checkpoint or the source checkout. All other files are
-    symlinked, so this adds no model-storage cost.
+    OpenWAM checkpoints can retain training-host paths and legacy encoder names
+    (``vjepa2_1``, ``flux_vae``, ``wan_vae``). A temporary staging directory
+    rewrites only those config fields without editing the checkpoint or source
+    checkout. All other files are symlinked, so this adds no model-storage cost.
     """
-    if encoder_model_path is None:
-        yield model_path
-        return
-
     checkpoint_dir = Path(model_path).expanduser().resolve()
-    encoder_dir = Path(encoder_model_path).expanduser().resolve()
     if not checkpoint_dir.is_dir():
         raise FileNotFoundError(f"OpenWAM checkpoint directory not found: {checkpoint_dir}")
-    if not encoder_dir.is_dir():
-        raise FileNotFoundError(f"OpenWAM encoder_model_path is not a directory: {encoder_dir}")
 
     from omegaconf import OmegaConf
+
+    cfg = OmegaConf.load(checkpoint_dir / "config.yaml")
+    encoder_cfg = OmegaConf.select(cfg, "model.video_backbone.encoder", default=None)
+    encoder_name = str(getattr(encoder_cfg, "name", "")) if encoder_cfg is not None else ""
+    name_aliases = {"vjepa2_1": "vjepa21", "flux_vae": "flux2_vae", "wan_vae": "wan22_vae"}
+    canonical_name = name_aliases.get(encoder_name, encoder_name)
+    needs_staging = encoder_model_path is not None or canonical_name != encoder_name
+    if not needs_staging:
+        yield model_path
+        return
+    if encoder_cfg is None:
+        raise ValueError(
+            "OpenWAM encoder override/alias normalization requires "
+            "model.video_backbone.encoder in the checkpoint config"
+        )
+    if encoder_model_path is not None:
+        encoder_dir = Path(encoder_model_path).expanduser().resolve()
+        if not encoder_dir.is_dir():
+            raise FileNotFoundError(f"OpenWAM encoder_model_path is not a directory: {encoder_dir}")
+        encoder_cfg.model_path = str(encoder_dir)
+    if canonical_name != encoder_name:
+        encoder_cfg.name = canonical_name
 
     with tempfile.TemporaryDirectory(prefix="rlinf-openwam-") as tmp:
         staged = Path(tmp) / checkpoint_dir.name
@@ -195,14 +210,6 @@ def _checkpoint_with_encoder_override(
         for entry in checkpoint_dir.iterdir():
             if entry.name != "config.yaml":
                 os.symlink(entry, staged / entry.name, target_is_directory=entry.is_dir())
-        cfg = OmegaConf.load(checkpoint_dir / "config.yaml")
-        encoder_cfg = OmegaConf.select(cfg, "model.video_backbone.encoder", default=None)
-        if encoder_cfg is None:
-            raise ValueError(
-                "encoder_model_path override requires "
-                "model.video_backbone.encoder in the checkpoint config"
-            )
-        encoder_cfg.model_path = str(encoder_dir)
         OmegaConf.save(cfg, staged / "config.yaml")
         yield str(staged)
 
