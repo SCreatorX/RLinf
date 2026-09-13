@@ -64,7 +64,7 @@ Evaluation
 
 The LIBERO evaluation recipe uses the same checkpoint contract as this recipe. OpenWAM checkpoints trained on the canonical LIBERO bucket emit absolute EEF10 goals; RLinf converts each goal against the current achieved pose before sending the 7-D OSC command.
 
-Run a short single-environment smoke test after setting ``MUJOCO_GL=egl`` and ``PYOPENGL_PLATFORM=egl``. The checked-in recipe pins one LIBERO worker per GPU because multi-worker rendering is host-dependent:
+Run a short two-environment smoke test after setting ``MUJOCO_GL=egl`` and ``PYOPENGL_PLATFORM=egl``. The checked-in recipe places the env worker and rollout worker on separate GPUs so EGL rendering does not share a GPU with OpenWAM inference:
 
 .. code:: bash
 

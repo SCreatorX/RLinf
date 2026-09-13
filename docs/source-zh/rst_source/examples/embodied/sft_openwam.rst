@@ -64,7 +64,7 @@ OpenWAM checkpoint 会提供模型和 dataloader 设置。将 ``data.train_data_
 
 LIBERO 评估配方与本配方使用同一套 checkpoint 约定。按标准 LIBERO 数据训练的 OpenWAM checkpoint 输出绝对 EEF10 目标位姿；RLinf 会在每个环境 step 根据当前实际位姿计算目标差值，再发送 7D OSC 动作。
 
-设置 ``MUJOCO_GL=egl`` 和 ``PYOPENGL_PLATFORM=egl`` 后，可以先运行单环境 32 步 smoke test。当前配方固定为每个 GPU 一个 LIBERO worker，多 worker 渲染需先在目标机器验证：
+设置 ``MUJOCO_GL=egl`` 和 ``PYOPENGL_PLATFORM=egl`` 后，可以先运行双环境 32 步 smoke test。当前配方将 env worker 与 rollout worker 分到不同 GPU，避免 EGL 渲染和 OpenWAM 推理争用同一张卡：
 
 .. code:: bash
 
