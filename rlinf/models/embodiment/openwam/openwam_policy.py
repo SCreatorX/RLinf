@@ -57,7 +57,9 @@ class OpenWAMPolicy(nn.Module, BasePolicy):
         cfg.inference.denoise_steps = denoise_steps
         cfg.inference.height = height
         cfg.inference.width = width
-        training_cfg = OmegaConf.select(cfg, "training", default={})
+        freeze_names = OmegaConf.select(cfg, "model.freeze", default=[]) or []
+        architecture.freeze_modules(list(freeze_names))
+        training_cfg = OmegaConf.select(cfg, "training", default=OmegaConf.create({}))
         architecture.init_training_schedulers(1000)
         architecture.set_training_runtime(
             use_gradient_checkpointing=bool(OmegaConf.select(training_cfg, "use_gradient_checkpointing", default=False)),

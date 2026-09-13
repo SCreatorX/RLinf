@@ -13,13 +13,13 @@ from __future__ import annotations
 from typing import Any
 
 import torch
-from omegaconf import OmegaConf
+from omegaconf import ListConfig, OmegaConf
 
 
 def build_openwam_sft_dataloader(cfg: Any, world_size: int, rank: int, data_paths: Any,
                                  eval_dataset: bool = False) -> tuple[Any, dict[str, Any]]:
     """Construct a distributed DataLoader yielding lists of native samples."""
-    if isinstance(data_paths, (list, tuple)):
+    if isinstance(data_paths, (list, tuple, ListConfig)):
         if len(data_paths) != 1:
             raise ValueError("OpenWAM SFT currently accepts exactly one dataset path.")
         data_paths = data_paths[0]
@@ -47,11 +47,12 @@ def build_openwam_sft_dataloader(cfg: Any, world_size: int, rank: int, data_path
     sampler = torch.utils.data.distributed.DistributedSampler(
         dataset, num_replicas=int(world_size), rank=int(rank),
         shuffle=not eval_dataset, drop_last=True,
+        seed=int(OmegaConf.select(cfg, "actor.seed", default=0)),
     )
     batch_size = int(cfg.actor.get("eval_batch_size", cfg.actor.micro_batch_size)) if eval_dataset else int(cfg.actor.micro_batch_size)
     num_workers = int(OmegaConf.select(cfg, "data.num_workers", default=0))
     loader = torch.utils.data.DataLoader(
         dataset, batch_size=batch_size, sampler=sampler, num_workers=num_workers,
-        collate_fn=lambda samples: samples, pin_memory=True, drop_last=True,
+        collate_fn=list, pin_memory=True, drop_last=True,
     )
     return loader, {"dataset_type": str(native_dl.type), "dataset_dir": str(data_paths), "num_samples": len(dataset)}
