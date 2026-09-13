@@ -44,6 +44,7 @@ from rlinf.models.embodiment.modules.rlt_token_transformer import (
 from rlinf.models.embodiment.openwam.openwam_policy import (
     OpenWAMPolicy,
     _batch_value,
+    _checkpoint_with_encoder_override,
     _infer_batch_size,
     _libero_state_to_eef10,
     _to_pil,
@@ -119,6 +120,28 @@ def test_openwam_libero_action_adapter_smoke():
     np.testing.assert_allclose(converted[0, :6], 0.0)
     assert converted[0, 6] == -1.0
 
+
+
+def test_openwam_encoder_path_override_stages_checkpoint(tmp_path):
+    checkpoint = tmp_path / "checkpoint"
+    checkpoint.mkdir()
+    (checkpoint / "checkpoint_step_1.safetensors").write_bytes(b"weights")
+    (checkpoint / "normalization_stats.npy").write_bytes(b"stats")
+    (checkpoint / "config.yaml").write_text(
+        "model:\n  video_backbone:\n    encoder:\n      name: vjepa2_1\n      model_path: /old/host/path\n",
+        encoding="utf-8",
+    )
+    encoder = tmp_path / "encoder"
+    encoder.mkdir()
+
+    with _checkpoint_with_encoder_override(str(checkpoint), str(encoder)) as staged_path:
+        staged = Path(staged_path)
+        cfg = OmegaConf.load(staged / "config.yaml")
+        assert cfg.model.video_backbone.encoder.model_path == str(encoder.resolve())
+        assert (staged / "checkpoint_step_1.safetensors").is_symlink()
+        assert (staged / "normalization_stats.npy").is_symlink()
+
+    assert not Path(staged_path).exists()
 
 def test_openwam_sft_forward_delegates_native_loss():
     class _Architecture(torch.nn.Module):

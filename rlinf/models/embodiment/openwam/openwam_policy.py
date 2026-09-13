@@ -16,7 +16,11 @@
 
 from __future__ import annotations
 
-from typing import Any
+import os
+import tempfile
+from contextlib import contextmanager
+from pathlib import Path
+from typing import Any, Iterator
 
 import numpy as np
 import torch
@@ -52,12 +56,21 @@ class OpenWAMPolicy(nn.Module, BasePolicy):
     def from_checkpoint(cls, model_path: str, *, ckpt_name: str | None, device: str,
                         torch_dtype: torch.dtype | None, num_frames: int, height: int,
                         width: int, denoise_steps: int, lambda_video: float = 1.0,
-                        lambda_action: float = 1.0) -> "OpenWAMPolicy":
+                        lambda_action: float = 1.0,
+                        encoder_model_path: str | None = None) -> "OpenWAMPolicy":
         """Build OpenWAM's checkpoint loader and joint inference engine."""
         from omegaconf import OmegaConf
         from openwam.deploy import JointInferenceEngine, load_from_checkpoint_dir
 
-        cfg, architecture = load_from_checkpoint_dir(model_path, device=device, ckpt_name=ckpt_name)
+        # Checkpoints produced on the training host may retain an absolute
+        # ``model.video_backbone.encoder.model_path``.  Alternate encoders
+        # (DINOv3, Flux VAE, V-JEPA) are not always copied into the deploy
+        # bundle, so allow the eval config to repoint that one dependency while
+        # keeping the checkpoint itself immutable.
+        with _checkpoint_with_encoder_override(model_path, encoder_model_path) as load_dir:
+            cfg, architecture = load_from_checkpoint_dir(
+                load_dir, device=device, ckpt_name=ckpt_name
+            )
         if OmegaConf.select(cfg, "inference", default=None) is None:
             cfg.inference = {}
         cfg.inference.num_frames = num_frames
@@ -150,6 +163,48 @@ class OpenWAMPolicy(nn.Module, BasePolicy):
             actions.append(np.asarray(result["actions"]))
             results.append(result)
         return torch.as_tensor(np.stack(actions), dtype=torch.float32), {"results": results}
+
+
+@contextmanager
+def _checkpoint_with_encoder_override(
+    model_path: str, encoder_model_path: str | None
+) -> Iterator[str]:
+    """Yield a checkpoint directory with an optional external encoder override.
+
+    OpenWAM's native loader reads ``config.yaml`` before constructing the
+    architecture. A temporary staging directory rewrites only that path
+    without editing the checkpoint or the source checkout. All other files are
+    symlinked, so this adds no model-storage cost.
+    """
+    if encoder_model_path is None:
+        yield model_path
+        return
+
+    checkpoint_dir = Path(model_path).expanduser().resolve()
+    encoder_dir = Path(encoder_model_path).expanduser().resolve()
+    if not checkpoint_dir.is_dir():
+        raise FileNotFoundError(f"OpenWAM checkpoint directory not found: {checkpoint_dir}")
+    if not encoder_dir.is_dir():
+        raise FileNotFoundError(f"OpenWAM encoder_model_path is not a directory: {encoder_dir}")
+
+    from omegaconf import OmegaConf
+
+    with tempfile.TemporaryDirectory(prefix="rlinf-openwam-") as tmp:
+        staged = Path(tmp) / checkpoint_dir.name
+        staged.mkdir()
+        for entry in checkpoint_dir.iterdir():
+            if entry.name != "config.yaml":
+                os.symlink(entry, staged / entry.name, target_is_directory=entry.is_dir())
+        cfg = OmegaConf.load(checkpoint_dir / "config.yaml")
+        encoder_cfg = OmegaConf.select(cfg, "model.video_backbone.encoder", default=None)
+        if encoder_cfg is None:
+            raise ValueError(
+                "encoder_model_path override requires "
+                "model.video_backbone.encoder in the checkpoint config"
+            )
+        encoder_cfg.model_path = str(encoder_dir)
+        OmegaConf.save(cfg, staged / "config.yaml")
+        yield str(staged)
 
 
 def _infer_batch_size(obs: dict[str, Any]) -> int:

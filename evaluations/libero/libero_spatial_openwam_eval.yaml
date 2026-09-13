@@ -34,7 +34,9 @@ env:
   group_name: "EnvGroup"
   eval:
     rollout_epoch: 1
-    total_num_envs: 2
+    # LIBERO subprocess workers are stable with one env per rollout group on
+    # this benchmark; increase only after validating the host's renderer.
+    total_num_envs: 1
     auto_reset: true
     ignore_terminations: true
     max_episode_steps: 320

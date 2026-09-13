@@ -38,6 +38,11 @@ def get_model(cfg: DictConfig, torch_dtype: torch.dtype | None = None) -> OpenWA
         denoise_steps=int(cfg.get("denoise_steps", 10)),
         lambda_video=float(cfg.get("lambda_video", 1.0)),
         lambda_action=float(cfg.get("lambda_action", 1.0)),
+        encoder_model_path=(
+            str(cfg.get("encoder_model_path"))
+            if cfg.get("encoder_model_path") is not None
+            else None
+        ),
     )
 
 
