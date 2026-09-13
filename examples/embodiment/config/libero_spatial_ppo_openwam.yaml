@@ -105,6 +105,7 @@ rollout:
     device: cuda
     num_frames: 33
     denoise_steps: 4
+    action_dim: 10
 
 actor:
   group_name: "ActorGroup"
@@ -122,6 +123,7 @@ actor:
     device: cuda
     num_frames: 33
     denoise_steps: 4
+    action_dim: 10
     num_action_chunks: 32 # generated actions = num_frames - 1
     add_value_head: True
     openwam:
