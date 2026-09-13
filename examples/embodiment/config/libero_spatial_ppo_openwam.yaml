@@ -71,6 +71,7 @@ env:
   # Override the default values in env/libero_spatial
   train:
     rollout_epoch: 8
+    openwam_action_representation: absolute_eef10
     total_num_envs: 64
     max_episode_steps: 240 # max episode steps for truncation
     max_steps_per_rollout_epoch: 240
@@ -100,6 +101,8 @@ rollout:
     model_path: "/mnt/data/wangyuran/openwam_checkpoints/openwam-libero-sft-30000"
     precision: ${actor.model.precision}
     model_type: "openwam"
+    num_frames: 33
+    denoise_steps: 4
 
 actor:
   group_name: "ActorGroup"
