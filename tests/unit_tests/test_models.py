@@ -31,6 +31,7 @@ from omegaconf import OmegaConf
 
 from rlinf.algorithms.losses import compute_ppo_critic_loss
 from rlinf.config import SupportedModel
+from rlinf.envs.action_utils import _openwam_eef10_to_libero7
 from rlinf.hybrid_engines.fsdp.utils import get_fsdp_wrap_policy
 from rlinf.models import get_model, register_model
 from rlinf.models.embodiment.base_policy import ForwardType
@@ -41,6 +42,7 @@ from rlinf.models.embodiment.openwam.openwam_policy import (
     OpenWAMPolicy,
     _batch_value,
     _infer_batch_size,
+    _libero_state_to_eef10,
     _to_pil,
 )
 from rlinf.utils.env_helpers import HistoryManager
@@ -86,6 +88,23 @@ def test_openwam_observation_adapter_smoke():
     assert _infer_batch_size(observations) == 2
     assert _batch_value(observations, ("states",), 1).shape == (7,)
     assert _to_pil(_batch_value(observations, ("main_images",), 0)).size == (16, 16)
+
+
+def test_openwam_libero_state_adapter_smoke():
+    state = np.array([0.1, 0.2, 0.3, 0.0, 0.0, 0.0, 0.04, 0.04], dtype=np.float32)
+    eef10 = _libero_state_to_eef10(state)
+    assert eef10.shape == (10,)
+    np.testing.assert_allclose(eef10[:3], state[:3])
+    np.testing.assert_allclose(eef10[3:9], [1, 0, 0, 0, 1, 0])
+    assert eef10[9] == -1.0
+
+
+def test_openwam_libero_action_adapter_smoke():
+    action = np.array([[0, 0, 0, 1, 0, 0, 0, 1, 0, 1]], dtype=np.float32)
+    converted = _openwam_eef10_to_libero7(action)
+    assert converted.shape == (1, 7)
+    np.testing.assert_allclose(converted[0, :6], 0.0)
+    assert converted[0, 6] == -1.0
 
 
 def test_openwam_sft_forward_delegates_native_loss():

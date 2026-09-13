@@ -70,6 +70,8 @@ def prepare_actions_for_libero(
     model_type,
 ) -> np.ndarray:
     chunk_actions = raw_chunk_actions
+    if SupportedModel(model_type) == SupportedModel.OPENWAM:
+        return _openwam_eef10_to_libero7(chunk_actions)
     if SupportedModel(model_type) in [
         SupportedModel.OPENVLA,
         SupportedModel.OPENVLA_OFT,
@@ -80,6 +82,30 @@ def prepare_actions_for_libero(
         chunk_actions[..., -1] = 2 * chunk_actions[..., -1] - 1
         chunk_actions[..., -1] = np.sign(chunk_actions[..., -1]) * -1.0
     return chunk_actions
+
+
+def _openwam_eef10_to_libero7(raw_chunk_actions: np.ndarray) -> np.ndarray:
+    """Convert native OpenWAM EEF10 deltas to LIBERO's 7-D OSC action."""
+    from scipy.spatial.transform import Rotation
+
+    raw = np.asarray(raw_chunk_actions, dtype=np.float32)
+    if raw.shape[-1] != 10:
+        raise ValueError(
+            f"OpenWAM LIBERO rollout expects 10-D EEF actions, got {raw.shape}"
+        )
+    r6d = raw[..., 3:9].reshape(-1, 6).astype(np.float64)
+    first = r6d[:, :3]
+    second = r6d[:, 3:]
+    first /= np.maximum(np.linalg.norm(first, axis=-1, keepdims=True), 1e-8)
+    second -= np.sum(first * second, axis=-1, keepdims=True) * first
+    second /= np.maximum(np.linalg.norm(second, axis=-1, keepdims=True), 1e-8)
+    matrices = np.stack([first, second, np.cross(first, second)], axis=-1)
+    rotvec = Rotation.from_matrix(matrices).as_rotvec().astype(np.float32)
+    output = np.concatenate(
+        [raw[..., :3], rotvec.reshape(raw.shape[:-1] + (3,)), -raw[..., 9:10]],
+        axis=-1,
+    )
+    return np.clip(output, -1.0, 1.0).astype(np.float32)
 
 
 def prepare_actions_for_isaaclab(

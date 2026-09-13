@@ -40,6 +40,13 @@ class OpenWAMPolicy(nn.Module, BasePolicy):
         self.lambda_video = float(lambda_video)
         self.lambda_action = float(lambda_action)
         self.architecture = engine.architecture
+        engine_cfg = getattr(engine, "cfg", None)
+        dataloader_cfg = getattr(engine_cfg, "dataloader", None)
+        self._multiview = bool(getattr(dataloader_cfg, "multiview", False))
+        layout = getattr(dataloader_cfg, "camera_layout", None)
+        self._camera_layout = list(layout) if layout is not None else [
+            "head_camera", "left_camera", "right_camera"
+        ]
 
     @classmethod
     def from_checkpoint(cls, model_path: str, *, ckpt_name: str | None, device: str,
@@ -116,10 +123,26 @@ class OpenWAMPolicy(nn.Module, BasePolicy):
         batch_size = _infer_batch_size(env_obs)
         actions, results = [], []
         for index in range(batch_size):
+            main_image = _to_pil(
+                _batch_value(env_obs, ("main_images", "image", "images"), index)
+            )
+            wrist_image = _batch_value(
+                env_obs, ("wrist_images", "wrist_image"), index, None
+            )
+            image = _compose_observation_image(
+                main_image,
+                _to_pil(wrist_image) if wrist_image is not None else None,
+                multiview=self._multiview,
+                camera_layout=self._camera_layout,
+                height=self.height,
+                width=self.width,
+            )
             condition = {
                 "prompt": _batch_value(env_obs, ("task_descriptions", "task_description", "language"), index, ""),
-                "first_frame_image": [_to_pil(_batch_value(env_obs, ("main_images", "image", "images"), index))],
-                "proprio": _batch_value(env_obs, ("states", "state", "proprio"), index),
+                "first_frame_image": [image],
+                "proprio": _libero_state_to_eef10(
+                    _batch_value(env_obs, ("states", "state", "proprio"), index, None)
+                ),
                 "num_frames": self.num_frames, "height": self.height, "width": self.width,
                 "denoise_steps": self.denoise_steps, "decode_video": False,
             }
@@ -162,3 +185,55 @@ def _to_pil(value: Any) -> Image.Image:
     if array.dtype != np.uint8:
         array = np.clip(array * 255 if array.max() <= 1.0 else array, 0, 255).astype(np.uint8)
     return Image.fromarray(array)
+
+
+def _axis_angle_to_rotation_6d(value: Any) -> np.ndarray:
+    """Convert a LIBERO axis-angle state to OpenWAM's 6-D representation."""
+    from scipy.spatial.transform import Rotation
+
+    matrix = Rotation.from_rotvec(np.asarray(value, dtype=np.float64).reshape(3)).as_matrix()
+    return np.concatenate([matrix[:, 0], matrix[:, 1]]).astype(np.float32)
+
+
+def _libero_state_to_eef10(value: Any) -> np.ndarray | None:
+    """Convert RLinf's 8-D LIBERO state to OpenWAM's achieved EEF10 state."""
+    if value is None:
+        return None
+    state = np.asarray(value, dtype=np.float32).reshape(-1)
+    if state.shape[0] == 10:
+        return state
+    if state.shape[0] != 8:
+        raise ValueError(
+            "OpenWAM LIBERO rollout expects an 8-D state "
+            f"(xyz, axis-angle, gripper qpos), got {state.shape[0]}"
+        )
+    gripper_width = float(state[6] - state[7])
+    gripper_open_scale = np.clip(2.0 * gripper_width / 0.08 - 1.0, -1.0, 1.0)
+    return np.concatenate(
+        [state[:3], _axis_angle_to_rotation_6d(state[3:6]), [gripper_open_scale]]
+    ).astype(np.float32)
+
+
+def _compose_observation_image(
+    main_image: Image.Image,
+    wrist_image: Image.Image | None,
+    *,
+    multiview: bool,
+    camera_layout: list[str],
+    height: int,
+    width: int,
+) -> Image.Image:
+    """Match OpenWAM's single-view or three-camera training layout."""
+    if not multiview:
+        return main_image
+    from openwam.dataloader.transforms.multiview import assemble_multiview_layout
+
+    frames = {camera_layout[0]: main_image}
+    if wrist_image is not None and len(camera_layout) > 1:
+        frames[camera_layout[1]] = wrist_image
+    return assemble_multiview_layout(
+        frames,
+        camera_layout=camera_layout,
+        out_h=height,
+        out_w=width,
+    )
