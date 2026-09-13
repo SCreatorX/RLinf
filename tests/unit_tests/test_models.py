@@ -757,3 +757,45 @@ def test_delay_metrics_report_every_sample():
 
     assert metrics.tolist() == pytest.approx([0.03, 0.03])
     assert env.insert_delay_metrics().numel() == 0
+
+
+def test_openwam_rl_forward_rescores_and_backpropagates():
+    """The RL contract must produce finite scores and gradients on both heads."""
+    class _Architecture(torch.nn.Module):
+        action_dim = 4
+        uses_proprioception = True
+
+        def __init__(self):
+            super().__init__()
+            self.weight = torch.nn.Parameter(torch.tensor(0.2))
+
+        def forward(self, action, timestep, proprio=None, **inputs):
+            del timestep, proprio
+            return torch.zeros_like(inputs["latents"]) + self.weight, action * 0 + self.weight
+
+    engine = SimpleNamespace(
+        architecture=_Architecture(),
+        cfg=SimpleNamespace(dataloader=SimpleNamespace(multiview=False, camera_layout=[])),
+    )
+    policy = OpenWAMPolicy(engine, num_frames=3, height=4, width=4, denoise_steps=2)
+    forward_inputs = {
+        "chains": torch.zeros(2, 2, 2, 4),
+        "denoise_inds": torch.zeros(2, 2, dtype=torch.long),
+        "video_latents": torch.zeros(2, 2, 3),
+        "sigma": torch.ones(2, 1),
+        "sigma_next": torch.zeros(2, 1),
+        "noise_std": torch.full((2, 1), 0.1),
+        "video_timesteps": torch.full((2, 1), 1000.0),
+        "action_timesteps": torch.full((2, 1), 1000.0),
+        "active_action_indices": torch.tensor([[0, 1, 2, 3], [0, 1, 2, 3]]),
+        "native__latents": torch.zeros(2, 2, 3),
+        "native__context": torch.ones(2, 4, 3),
+        "native__proprio": torch.ones(2, 8),
+    }
+    forward_inputs["chains"][:, 1] = 0.2
+    result = policy.default_forward(forward_inputs=forward_inputs)
+    assert result["logprobs"].shape == (2, 2, 4)
+    assert result["values"].shape == (2,)
+    (-result["logprobs"].mean() + result["values"].mean()).backward()
+    assert policy.engine.architecture.weight.grad is not None
+    assert policy.value_head[0].weight.grad is not None
