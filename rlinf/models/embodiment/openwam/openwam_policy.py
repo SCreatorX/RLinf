@@ -93,8 +93,7 @@ class OpenWAMPolicy(nn.Module, BasePolicy):
                     num_frames=num_frames, height=height, width=width,
                     denoise_steps=denoise_steps, lambda_video=lambda_video,
                     lambda_action=lambda_action)
-        if torch_dtype is not None:
-            model.to(dtype=torch_dtype)
+        model.to(device=device, dtype=torch_dtype or next(architecture.parameters()).dtype)
         return model
 
     def forward(self, forward_type: ForwardType = ForwardType.DEFAULT, **kwargs):
