@@ -276,7 +276,11 @@ class OpenWAMPolicy(nn.Module, BasePolicy):
                 physical = normalizer.unnormalize(physical)
             flat["action"] = torch.as_tensor(physical, device=device).reshape(-1).float()
             for key, value in native.items():
-                if isinstance(value, torch.Tensor) and value.ndim > 0 and value.shape[0] == 1:
+                if not isinstance(value, torch.Tensor):
+                    continue
+                if key == "proprio" and value.ndim == 1:
+                    value = value.unsqueeze(0)
+                if value.ndim > 0 and value.shape[0] == 1:
                     flat[f"native__{key}"] = value.contiguous()
             records.append(flat)
             outputs.append(torch.as_tensor(physical, device=device, dtype=torch.float32))
