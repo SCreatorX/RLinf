@@ -2348,7 +2348,7 @@ install_openwam_deps() {
     local openwam_path
     openwam_path=$(clone_or_reuse_repo OPENWAM_PATH "$VENV_DIR/openwam" https://github.com/OpenWAM-Official/OpenWAM.git)
     if [ -z "${OPENWAM_PATH:-}" ]; then
-        git -C "$openwam_path" checkout "${OPENWAM_GIT_REF:-main}" >&2
+        git -C "$openwam_path" checkout "${OPENWAM_GIT_REF:-a8992b613fdb5b1c4649f53b3a914379c49e3892}" >&2
     fi
 
     # Cosmos-Predict2.5 is a submodule under third_party/ and is only needed by the
