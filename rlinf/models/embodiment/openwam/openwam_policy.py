@@ -118,13 +118,13 @@ class OpenWAMPolicy(nn.Module, BasePolicy):
         native = {k[len("native__"):]: v for k, v in forward_inputs.items() if k.startswith("native__")}
         native["latents"] = forward_inputs["video_latents"]
         proprio = native.pop("proprio", None)
-        _, a_pred = self.architecture.forward(action_t, forward_inputs["action_timesteps"],
+        _, a_pred = self.architecture.forward(action_t, forward_inputs["action_timesteps"].view(-1),
                                                proprio=proprio, **native,
-                                               timestep=forward_inputs["video_timesteps"])
-        sigma, sigma_next = forward_inputs["sigma"], forward_inputs["sigma_next"]
+                                               timestep=forward_inputs["video_timesteps"].view(-1))
+        sigma, sigma_next = forward_inputs["sigma"].view(-1), forward_inputs["sigma_next"].view(-1)
         mean = action_t + a_pred * (sigma_next - sigma).view(-1, 1, 1)
         std = forward_inputs["noise_std"].view(-1, 1, 1).clamp_min(1e-6)
-        active = forward_inputs["active_action_indices"].long()
+        active = forward_inputs["active_action_indices"][0].long()
         if compute_logprobs:
             all_logprobs = (-0.5 * ((action_next - mean) / std).square()
                             - torch.log(std) - 0.5 * np.log(2.0 * np.pi))
