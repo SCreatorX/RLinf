@@ -64,7 +64,7 @@ Evaluation
 
 The LIBERO evaluation recipe uses the same checkpoint contract as this recipe. OpenWAM checkpoints trained on the canonical LIBERO bucket emit absolute EEF10 goals; RLinf converts each goal against the current achieved pose before sending the 7-D OSC command.
 
-Run a short smoke test with two environments after setting ``MUJOCO_GL=egl`` and ``PYOPENGL_PLATFORM=egl``:
+Run a short single-environment smoke test after setting ``MUJOCO_GL=egl`` and ``PYOPENGL_PLATFORM=egl``. The checked-in recipe pins one LIBERO worker per GPU because multi-worker rendering is host-dependent:
 
 .. code:: bash
 
@@ -73,3 +73,9 @@ Run a short smoke test with two environments after setting ``MUJOCO_GL=egl`` and
      env.eval.max_steps_per_rollout_epoch=32 env.eval.max_episode_steps=32
 
 For a checkpoint trained with native delta EEF10 actions, set ``env.eval.openwam_action_representation=native_delta_eef10``. Keep this value aligned with the dataset metadata and checkpoint used for evaluation.
+
+
+Alternate video encoders
+------------------------
+
+Some older OpenWAM checkpoints use legacy encoder names (``vjepa2_1``, ``flux_vae``, or ``wan_vae``); RLinf normalizes these names at deployment. If the encoder weights are stored outside the checkpoint, set ``rollout.model.encoder_model_path`` to the local encoder directory. RLinf stages a temporary config and leaves the checkpoint unchanged.

@@ -64,7 +64,7 @@ OpenWAM checkpoint 会提供模型和 dataloader 设置。将 ``data.train_data_
 
 LIBERO 评估配方与本配方使用同一套 checkpoint 约定。按标准 LIBERO 数据训练的 OpenWAM checkpoint 输出绝对 EEF10 目标位姿；RLinf 会在每个环境 step 根据当前实际位姿计算目标差值，再发送 7D OSC 动作。
 
-设置 ``MUJOCO_GL=egl`` 和 ``PYOPENGL_PLATFORM=egl`` 后，可以先运行 32 步 smoke test：
+设置 ``MUJOCO_GL=egl`` 和 ``PYOPENGL_PLATFORM=egl`` 后，可以先运行单环境 32 步 smoke test。当前配方固定为每个 GPU 一个 LIBERO worker，多 worker 渲染需先在目标机器验证：
 
 .. code:: bash
 
@@ -73,3 +73,9 @@ LIBERO 评估配方与本配方使用同一套 checkpoint 约定。按标准 LIB
      env.eval.max_steps_per_rollout_epoch=32 env.eval.max_episode_steps=32
 
 如果 checkpoint 使用 native delta EEF10 动作训练，将 ``env.eval.openwam_action_representation`` 改为 ``native_delta_eef10``，并确保它与数据 metadata 和评估 checkpoint 一致。
+
+
+其他视频编码器
+--------------
+
+部分旧 OpenWAM checkpoint 使用 ``vjepa2_1``、``flux_vae`` 或 ``wan_vae`` 这些旧名称，部署时 RLinf 会自动转换。如果编码器权重不在 checkpoint 内，可设置 ``rollout.model.encoder_model_path`` 指向本机编码器目录。RLinf 会使用临时配置加载，不会修改 checkpoint。
