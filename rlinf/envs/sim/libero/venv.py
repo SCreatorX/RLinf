@@ -263,6 +263,17 @@ class ReconfigureSubprocEnvWorker(SubprocEnvWorker):
         self.child_remote.close()
         EnvWorker.__init__(self, env_fn)
 
+    def recv(self):
+        """Receive a result and preserve the child exit status on EOF."""
+        try:
+            return super().recv()
+        except EOFError as exc:
+            exitcode = self.process.exitcode
+            raise RuntimeError(
+                "LIBERO environment subprocess exited before returning a result "
+                f"(exitcode={exitcode}); inspect the worker log for the child traceback"
+            ) from exc
+
     def reconfigure_env_fn(self, env_fn_param):
         self.parent_remote.send(["reconfigure", env_fn_param])
         return self.parent_remote.recv()
