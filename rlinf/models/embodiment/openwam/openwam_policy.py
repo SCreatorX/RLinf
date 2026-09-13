@@ -51,6 +51,8 @@ class OpenWAMPolicy(nn.Module, BasePolicy):
         self._camera_layout = list(layout) if layout is not None else [
             "head_camera", "left_camera", "right_camera"
         ]
+        # PPO value features include pooled visual latents and proprioception.
+        self.value_head = nn.Sequential(nn.Linear(8, 128), nn.SiLU(), nn.Linear(128, 1))
 
     @classmethod
     def from_checkpoint(cls, model_path: str, *, ckpt_name: str | None, device: str,
@@ -103,9 +105,47 @@ class OpenWAMPolicy(nn.Module, BasePolicy):
     def default_forward(self, **kwargs):
         if "data" in kwargs:
             return self.sft_forward(**kwargs)
-        raise NotImplementedError(
-            "OpenWAM default_forward requires SFT data; use predict_action_batch for rollout evaluation."
-        )
+        return self.rl_forward(**kwargs)
+
+    def rl_forward(self, forward_inputs, compute_logprobs=True, compute_values=True,
+                   compute_entropy=False, **kwargs):
+        """Rescore the selected stochastic native denoising transition."""
+        del kwargs
+        chains = forward_inputs["chains"]
+        chosen = forward_inputs["denoise_inds"][:, 0].long()
+        rows = torch.arange(chains.shape[0], device=chains.device)
+        action_t, action_next = chains[rows, chosen], chains[rows, chosen + 1]
+        native = {k[len("native__"):]: v for k, v in forward_inputs.items() if k.startswith("native__")}
+        native["latents"] = forward_inputs["video_latents"]
+        _, a_pred = self.architecture.forward(action_t, forward_inputs["action_timesteps"],
+                                               **native, timestep=forward_inputs["video_timesteps"])
+        sigma, sigma_next = forward_inputs["sigma"], forward_inputs["sigma_next"]
+        mean = action_t + a_pred * (sigma_next - sigma).view(-1, 1, 1)
+        std = forward_inputs["noise_std"].view(-1, 1, 1).clamp_min(1e-6)
+        dim = int(forward_inputs["env_action_dim"][0].item())
+        if compute_logprobs:
+            logprobs = (-0.5 * ((action_next - mean) / std).square()
+                        - torch.log(std) - 0.5 * np.log(2.0 * np.pi))[:, :, :dim]
+        else:
+            logprobs = torch.zeros_like(action_next[:, :, :dim])
+        values = self.value_head(self._value_features(forward_inputs, action_t)).squeeze(-1)
+        if not compute_values:
+            values = torch.zeros(chains.shape[0], device=chains.device)
+        entropy = (-torch.log(std) - 0.5 * np.log(2.0 * np.pi)).expand_as(logprobs) if compute_entropy else None
+        return {"logprobs": logprobs.float(), "values": values.float(), "entropy": entropy}
+
+    @staticmethod
+    def _value_features(inputs, action):
+        def stats(x):
+            x = x.float().flatten(1)
+            return x.mean(1), x.std(1, unbiased=False)
+        vm, vs = stats(inputs["video_latents"])
+        context = inputs.get("native__context", inputs["video_latents"])
+        cm, cs = stats(context)
+        proprio = inputs.get("native__proprio", action)
+        pm, ps = stats(proprio)
+        am, astd = stats(action)
+        return torch.stack((vm, vs, cm, cs, pm, ps, am, astd), dim=-1)
 
     def sft_forward(self, data: Any = None, **kwargs) -> dict[str, torch.Tensor]:
         """Compute OpenWAM's native joint video/action SFT loss."""
@@ -131,8 +171,10 @@ class OpenWAMPolicy(nn.Module, BasePolicy):
 
     def predict_action_batch(self, env_obs: dict[str, Any], mode: str = "eval", **kwargs):
         """Generate one action chunk per observation in ``env_obs``."""
+        if mode == "train":
+            return self._predict_rl_batch(env_obs)
         if mode != "eval":
-            raise NotImplementedError("OpenWAM rollout training mode is not implemented yet.")
+            raise ValueError(f"Unknown OpenWAM predict mode: {mode!r}")
         batch_size = _infer_batch_size(env_obs)
         actions, results = [], []
         for index in range(batch_size):
@@ -163,6 +205,76 @@ class OpenWAMPolicy(nn.Module, BasePolicy):
             actions.append(np.asarray(result["actions"]))
             results.append(result)
         return torch.as_tensor(np.stack(actions), dtype=torch.float32), {"results": results}
+
+    @torch.no_grad()
+    def _predict_rl_batch(self, env_obs):
+        """Collect a native joint-flow chain for PPO."""
+        batch_size = _infer_batch_size(env_obs)
+        records, outputs, prev_logprobs = [], [], []
+        steps = max(2, self.denoise_steps)
+        parameter = next(self.architecture.parameters())
+        device, dtype = parameter.device, parameter.dtype
+        action_dim = int(self.architecture.action_dim)
+        for index in range(batch_size):
+            main = _to_pil(_batch_value(env_obs, ("main_images", "image", "images"), index))
+            wrist = _batch_value(env_obs, ("wrist_images", "wrist_image"), index, None)
+            image = _compose_observation_image(main, _to_pil(wrist) if wrist is not None else None,
+                                                multiview=self._multiview, camera_layout=self._camera_layout,
+                                                height=self.height, width=self.width)
+            proprio = _libero_state_to_eef10(_batch_value(env_obs, ("states", "state", "proprio"), index, None))
+            native = self.architecture.video_backbone.preprocess_input_for_inference(
+                prompt=_batch_value(env_obs, ("task_descriptions", "task_description", "language"), index, ""),
+                first_frame_image=[image], num_frames=self.num_frames, height=self.height, width=self.width,
+                seed=42, num_inference_steps=steps, shift=5.0, tiled=True, cfg_scale=1.0, cfg_merge=False)
+            native = {k: v.to(device=device, dtype=dtype) if isinstance(v, torch.Tensor) else v for k, v in native.items()}
+            if getattr(self.architecture, "uses_proprioception", False):
+                native["proprio"] = self.architecture.normalize_deploy_proprio(proprio).to(device=device, dtype=dtype)
+            video = native["latents"]
+            action = torch.randn(1, max(1, self.num_frames - 1), action_dim, device=device, dtype=dtype)
+            chosen = int(torch.randint(0, steps - 1, ()).item())
+            chains = [action]
+            selected_video = selected_sigma = selected_next = selected_std = selected_mean = None
+            for step in range(steps - 1):
+                sigma = torch.tensor([1.0 - step / (steps - 1)], device=device, dtype=dtype)
+                sigma_next = torch.tensor([1.0 - (step + 1) / (steps - 1)], device=device, dtype=dtype)
+                vp, ap = self.architecture.forward(action, sigma * 1000.0, **native, timestep=sigma * 1000.0)
+                if step == chosen:
+                    selected_video = native["latents"].detach().clone()
+                video = video + vp * (sigma_next - sigma)
+                native["latents"] = video
+                mean = action + ap * (sigma_next - sigma).view(1, 1, 1)
+                noise_std = torch.sqrt((sigma - sigma_next).clamp_min(1e-6)) * 0.05
+                if step == chosen:
+                    selected_sigma, selected_next, selected_std = sigma.detach(), sigma_next.detach(), noise_std.detach()
+                    selected_mean = mean.detach()
+                    action = mean + torch.randn_like(action) * noise_std
+                else:
+                    action = mean
+                chains.append(action)
+            flat = {"chains": torch.stack(chains, dim=1).squeeze(0).contiguous(),
+                    "denoise_inds": torch.full((steps,), chosen, device=device, dtype=torch.long),
+                    "video_latents": selected_video.squeeze(0).contiguous(), "sigma": selected_sigma,
+                    "sigma_next": selected_next, "noise_std": selected_std,
+                    "video_timesteps": selected_sigma * 1000.0, "action_timesteps": selected_sigma * 1000.0,
+                    "env_action_dim": torch.tensor([action_dim], device=device, dtype=torch.long),
+                    "model_action": action.squeeze(0).reshape(-1).float()}
+            physical = action.squeeze(0).float().cpu().numpy()
+            normalizer = getattr(self.architecture, "normalizer", None)
+            if normalizer is not None:
+                physical = normalizer.unnormalize(physical)
+            flat["action"] = torch.as_tensor(physical, device=device).reshape(-1).float()
+            prev_logprobs.append((-0.5 * ((action - selected_mean) / selected_std).square()
+                                  - torch.log(selected_std) - 0.5 * np.log(2.0 * np.pi)
+                                  ).squeeze(0).float())
+            for key, value in native.items():
+                if isinstance(value, torch.Tensor) and value.ndim > 0 and value.shape[0] == 1:
+                    flat[f"native__{key}"] = value.contiguous()
+            records.append(flat)
+            outputs.append(torch.as_tensor(physical, device=device, dtype=torch.float32))
+        prev = torch.stack(prev_logprobs, dim=0)
+        return torch.stack(outputs), {"prev_logprobs": prev,
+                                     "prev_values": torch.zeros(batch_size, 1, device=device),
+                                     "forward_inputs": _stack_flat_records(records)}
 
 
 @contextmanager
@@ -299,3 +411,37 @@ def _compose_observation_image(
         out_h=height,
         out_w=width,
     )
+
+
+def _stack_flat_records(records: list[dict[str, torch.Tensor]]) -> dict[str, torch.Tensor]:
+    """Stack per-observation tensors while preserving the rollout flat contract."""
+    if not records:
+        raise ValueError("OpenWAM RL sampler produced no records")
+    keys = set(records[0])
+    if any(set(record) != keys for record in records[1:]):
+        raise ValueError("OpenWAM RL records have inconsistent native conditioning keys")
+    result = {}
+    for key in keys:
+        values = [record[key] for record in records]
+        if key.startswith("native__") and values[0].ndim > 0 and values[0].shape[0] == 1:
+            result[key] = torch.cat(values, dim=0).contiguous()
+        else:
+            result[key] = torch.stack(values, dim=0).contiguous()
+    return result
+
+
+def _stack_flat_records(records: list[dict[str, torch.Tensor]]) -> dict[str, torch.Tensor]:
+    """Stack per-observation tensors while preserving the rollout contract."""
+    if not records:
+        raise ValueError("OpenWAM RL sampler produced no records")
+    keys = set(records[0])
+    if any(set(record) != keys for record in records[1:]):
+        raise ValueError("OpenWAM RL records have inconsistent native conditioning keys")
+    result = {}
+    for key in keys:
+        values = [record[key] for record in records]
+        if key.startswith("native__") and values[0].ndim > 0 and values[0].shape[0] == 1:
+            result[key] = torch.cat(values, dim=0).contiguous()
+        else:
+            result[key] = torch.stack(values, dim=0).contiguous()
+    return result
