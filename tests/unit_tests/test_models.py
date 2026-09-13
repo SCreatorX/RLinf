@@ -31,7 +31,10 @@ from omegaconf import OmegaConf
 
 from rlinf.algorithms.losses import compute_ppo_critic_loss
 from rlinf.config import SupportedModel
-from rlinf.envs.action_utils import _openwam_eef10_to_libero7
+from rlinf.envs.action_utils import (
+    _openwam_absolute_eef10_to_libero7,
+    _openwam_eef10_to_libero7,
+)
 from rlinf.hybrid_engines.fsdp.utils import get_fsdp_wrap_policy
 from rlinf.models import get_model, register_model
 from rlinf.models.embodiment.base_policy import ForwardType
@@ -97,6 +100,16 @@ def test_openwam_libero_state_adapter_smoke():
     np.testing.assert_allclose(eef10[:3], state[:3])
     np.testing.assert_allclose(eef10[3:9], [1, 0, 0, 0, 1, 0])
     assert eef10[9] == -1.0
+
+
+def test_openwam_libero_absolute_action_adapter_smoke():
+    pose = np.array([[0.1, 0.2, 0.3, 1, 0, 0, 0, 1, 0, 1]], dtype=np.float32)
+    target = pose.copy()
+    target[0, 0] += 0.025
+    converted = _openwam_absolute_eef10_to_libero7(target, pose)
+    np.testing.assert_allclose(converted[0, :3], [0.5, 0.0, 0.0])
+    np.testing.assert_allclose(converted[0, 3:6], 0.0)
+    assert converted[0, 6] == -1.0
 
 
 def test_openwam_libero_action_adapter_smoke():

@@ -25,6 +25,7 @@ import numpy as np
 import torch
 from omegaconf.omegaconf import OmegaConf
 
+from rlinf.envs.action_utils import _openwam_absolute_eef10_to_libero7
 from rlinf.envs.sim.libero.utils import (
     build_interleaved_eval_reset_state_ids,
     distribute_reset_state_ids_round_robin,
@@ -892,10 +893,32 @@ class LiberoEnv(gym.Env):
             depth=depth,
         )
 
+    def _openwam_reference_eef10(self) -> np.ndarray:
+        """Read the current achieved LIBERO pose in OpenWAM's EEF10 format."""
+        if self.current_raw_obs is None:
+            raise RuntimeError(
+                "LIBERO must be reset before converting OpenWAM absolute actions"
+            )
+        references = []
+        from rlinf.utils.rot6d import quat_xyzw_to_rot6d
+
+        for obs in self.current_raw_obs:
+            pos = np.asarray(obs["robot0_eef_pos"], dtype=np.float32).reshape(-1)
+            quat = np.asarray(obs["robot0_eef_quat"], dtype=np.float32).reshape(-1)
+            qpos = np.asarray(obs["robot0_gripper_qpos"], dtype=np.float32).reshape(-1)
+            width = float(qpos[0] - qpos[1])
+            grip = np.clip(2.0 * width / 0.08 - 1.0, -1.0, 1.0)
+            references.append(np.concatenate([pos, quat_xyzw_to_rot6d(quat), [grip]]))
+        return np.asarray(references, dtype=np.float32)
+
     def step(self, actions=None, auto_reset=True, _skip_obs_wrap=False):
         """Step the environment with the given actions."""
         if isinstance(actions, torch.Tensor):
             actions = actions.detach().cpu().numpy()
+        if self.cfg.get("openwam_action_representation", None) == "absolute_eef10":
+            actions = _openwam_absolute_eef10_to_libero7(
+                actions, self._openwam_reference_eef10()
+            )
 
         self._elapsed_steps += 1
         raw_obs, _reward, terminations, info_lists = self.env.step(actions)
