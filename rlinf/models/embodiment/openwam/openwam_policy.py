@@ -212,6 +212,11 @@ class OpenWAMPolicy(nn.Module, BasePolicy):
     @torch.no_grad()
     def _predict_rl_batch(self, env_obs):
         """Collect a native joint-flow chain for PPO."""
+        if self.architecture.__class__.__name__ != "DualSystemSelfAttnArchitecture":
+            raise NotImplementedError(
+                "OpenWAM PPO rollout currently supports only the validated "
+                "dual_system_self_attn (Wan22) architecture."
+            )
         batch_size = _infer_batch_size(env_obs)
         records, outputs = [], []
         steps = max(2, self.denoise_steps)
