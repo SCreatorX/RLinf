@@ -24,6 +24,7 @@ from pathlib import Path
 from types import ModuleType, SimpleNamespace
 from unittest.mock import MagicMock
 
+import numpy as np
 import pytest
 import torch
 from omegaconf import OmegaConf
@@ -32,6 +33,11 @@ from rlinf.algorithms.losses import compute_ppo_critic_loss
 from rlinf.config import SupportedModel
 from rlinf.hybrid_engines.fsdp.utils import get_fsdp_wrap_policy
 from rlinf.models import get_model, register_model
+from rlinf.models.embodiment.openwam.openwam_policy import (
+    _batch_value,
+    _infer_batch_size,
+    _to_pil,
+)
 from rlinf.models.embodiment.modules.rlt_token_transformer import (
     RLTTokenTransformer,
 )
@@ -66,6 +72,18 @@ class _DummyFSDPModel(torch.nn.Module):
         self.block = _DummyBlock()
         self.head = torch.nn.Linear(4, 2)
         self.head._fsdp_wrap_name = "custom_head"
+
+
+def test_openwam_observation_adapter_smoke():
+    observations = {
+        "states": np.zeros((2, 7), dtype=np.float32),
+        "main_images": np.zeros((2, 16, 16, 3), dtype=np.uint8),
+        "task_descriptions": ["pick", "place"],
+    }
+
+    assert _infer_batch_size(observations) == 2
+    assert _batch_value(observations, ("states",), 1).shape == (7,)
+    assert _to_pil(_batch_value(observations, ("main_images",), 0)).size == (16, 16)
 
 
 def test_custom_model_registration_smoke():
