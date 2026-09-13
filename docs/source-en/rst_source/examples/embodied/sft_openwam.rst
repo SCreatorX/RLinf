@@ -58,3 +58,18 @@ Visualization and Results
 -------------------------
 
 Monitor ``train/loss``, ``train/loss_video``, and ``train/loss_action`` in TensorBoard. RLinf writes FSDP model and optimizer shards under ``runner.logger.log_path/<experiment_name>/checkpoints/global_step_<N>/actor``.
+
+Evaluation
+----------
+
+The LIBERO evaluation recipe uses the same checkpoint contract as this recipe. OpenWAM checkpoints trained on the canonical LIBERO bucket emit absolute EEF10 goals; RLinf converts each goal against the current achieved pose before sending the 7-D OSC command.
+
+Run a short smoke test with two environments after setting ``MUJOCO_GL=egl`` and ``PYOPENGL_PLATFORM=egl``:
+
+.. code:: bash
+
+   python evaluations/eval_embodied_agent.py \\
+     --config-path libero --config-name libero_spatial_openwam_eval \\
+     env.eval.max_steps_per_rollout_epoch=32 env.eval.max_episode_steps=32
+
+For a checkpoint trained with native delta EEF10 actions, set ``env.eval.openwam_action_representation=native_delta_eef10``. Keep this value aligned with the dataset metadata and checkpoint used for evaluation.

@@ -58,3 +58,18 @@ OpenWAM checkpoint 会提供模型和 dataloader 设置。将 ``data.train_data_
 --------
 
 在 TensorBoard 中观察 ``train/loss``、``train/loss_video`` 和 ``train/loss_action``。RLinf 会将 FSDP 模型和 optimizer shards 写入 ``runner.logger.log_path/<experiment_name>/checkpoints/global_step_<N>/actor``。
+
+评估
+----
+
+LIBERO 评估配方与本配方使用同一套 checkpoint 约定。按标准 LIBERO 数据训练的 OpenWAM checkpoint 输出绝对 EEF10 目标位姿；RLinf 会在每个环境 step 根据当前实际位姿计算目标差值，再发送 7D OSC 动作。
+
+设置 ``MUJOCO_GL=egl`` 和 ``PYOPENGL_PLATFORM=egl`` 后，可以先运行 32 步 smoke test：
+
+.. code:: bash
+
+   python evaluations/eval_embodied_agent.py \\
+     --config-path libero --config-name libero_spatial_openwam_eval \\
+     env.eval.max_steps_per_rollout_epoch=32 env.eval.max_episode_steps=32
+
+如果 checkpoint 使用 native delta EEF10 动作训练，将 ``env.eval.openwam_action_representation`` 改为 ``native_delta_eef10``，并确保它与数据 metadata 和评估 checkpoint 一致。
