@@ -83,6 +83,7 @@ After running SFT here, continue to :doc:`vla_wam_index` (model-centric RL) or :
    :maxdepth: 2
 
    OpenPI <embodied/sft_openpi>
+   OpenWAM <embodied/sft_openwam>
    OpenPI_RLinf <embodied/sft_openpi_rlinf>
    DreamZero <embodied/sft_dreamzero>
    Cosmos3 <embodied/sft_cosmos3>
