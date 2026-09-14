@@ -46,6 +46,9 @@ env:
     use_fixed_reset_state_ids: true
     use_ordered_reset_state_ids: true
     is_eval: true
+    # Only the final frame of each action chunk is consumed by eval; disabling
+    # intermediate EGL renders keeps multi-process LIBERO stable.
+    skip_intermediate_renders: true
     openwam_action_representation: absolute_eef10
     video_cfg:
       save_video: false
