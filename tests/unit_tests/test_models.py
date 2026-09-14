@@ -82,6 +82,65 @@ class _DummyFSDPModel(torch.nn.Module):
         self.head._fsdp_wrap_name = "custom_head"
 
 
+@pytest.fixture
+def openwam_recipe(monkeypatch):
+    import hydra
+
+    import rlinf.config as config_module
+
+    placement = SimpleNamespace(
+        get_world_size=lambda component: {"actor": 2, "env": 1, "rollout": 1}[component]
+    )
+    monkeypatch.setattr(config_module, "Cluster", lambda: object())
+    monkeypatch.setattr(
+        config_module, "HybridComponentPlacement", lambda cfg, cluster: placement
+    )
+    config_dir = Path(__file__).resolve().parents[2] / "examples/embodiment/config"
+
+    def load(name, overrides=None):
+        with hydra.initialize_config_dir(version_base="1.1", config_dir=str(config_dir)):
+            return hydra.compose(config_name=name, overrides=overrides or [])
+
+    return load
+
+
+@pytest.mark.parametrize(
+    "name",
+    [
+        "libero_spatial_ppo_openwam",
+        "libero_spatial_ppo_openwam_smoke",
+        "libero_spatial_ppo_openwam_long",
+    ],
+)
+def test_openwam_ppo_recipes_validate(openwam_recipe, name):
+    from rlinf.config import validate_embodied_cfg
+
+    cfg = openwam_recipe(name)
+    assert validate_embodied_cfg(cfg) is cfg
+
+
+@pytest.mark.parametrize(
+    ("overrides", "message"),
+    [
+        (
+            ["actor.global_batch_size=2048", "actor.micro_batch_size=128"],
+            r"5120 action-chunk samples.*global_batch_size \(2048\)",
+        ),
+        (["actor.global_batch_size=0"], "batch sizes must be positive"),
+        (["actor.micro_batch_size=0"], "batch sizes must be positive"),
+        (["actor.micro_batch_size=3"], r"micro_batch_size \* actor_world_size"),
+    ],
+)
+def test_openwam_ppo_rejects_invalid_batch_before_rollout(
+    openwam_recipe, overrides, message
+):
+    from rlinf.config import validate_embodied_cfg
+
+    cfg = openwam_recipe("libero_spatial_ppo_openwam", overrides)
+    with pytest.raises(AssertionError, match=message):
+        validate_embodied_cfg(cfg)
+
+
 def test_openwam_observation_adapter_smoke():
     observations = {
         "states": np.zeros((2, 7), dtype=np.float32),

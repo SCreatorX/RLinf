@@ -1167,6 +1167,35 @@ def validate_embodied_cfg(cfg):
         ), (
             "env.train.max_steps_per_rollout_epoch must be divisible by actor.model.num_action_chunks"
         )
+        if (
+            model_type == SupportedModel.OPENWAM
+            and algorithm_cfg.get("loss_type") == "actor_critic"
+            and not cfg.runner.get("use_training_pipeline", False)
+        ):
+            rollout_samples = (
+                cfg.env.train.total_num_envs
+                * cfg.env.train.rollout_epoch
+                * (
+                    cfg.env.train.max_steps_per_rollout_epoch
+                    // model_cfg.num_action_chunks
+                )
+            )
+            actor_world_size = component_placement.get_world_size("actor")
+            global_batch_size = cfg.actor.global_batch_size
+            micro_batch_size = cfg.actor.micro_batch_size
+            assert global_batch_size > 0 and micro_batch_size > 0, (
+                "OpenWAM PPO actor batch sizes must be positive."
+            )
+            assert global_batch_size % (micro_batch_size * actor_world_size) == 0, (
+                "OpenWAM PPO actor.global_batch_size must be divisible by "
+                "actor.micro_batch_size * actor_world_size."
+            )
+            assert rollout_samples > 0 and rollout_samples % global_batch_size == 0, (
+                f"OpenWAM PPO collects {rollout_samples} action-chunk samples "
+                "(total_num_envs * rollout_epoch * "
+                "max_steps_per_rollout_epoch / num_action_chunks), which must "
+                f"be divisible by actor.global_batch_size ({global_batch_size})."
+            )
     with open_dict(cfg):
         weight_sync_interval = cfg.runner.get("weight_sync_interval", 1)
         assert weight_sync_interval > 0, "weight_sync_interval must be greater than 0"

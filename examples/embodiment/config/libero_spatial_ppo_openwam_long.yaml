@@ -1,0 +1,23 @@
+# Full 320-step episodes with frequent actor updates for sustained validation.
+defaults:
+  - libero_spatial_ppo_openwam
+  - _self_
+
+runner:
+  max_epochs: 20
+  max_steps: 20
+  save_interval: 10
+  logger:
+    experiment_name: libero_spatial_ppo_openwam_long
+
+env:
+  train:
+    rollout_epoch: 1
+    total_num_envs: 8
+    video_cfg:
+      save_video: false
+
+actor:
+  micro_batch_size: 1
+  # 8 envs * 1 epoch * 10 chunks = 80 samples; five optimizer updates.
+  global_batch_size: 16
