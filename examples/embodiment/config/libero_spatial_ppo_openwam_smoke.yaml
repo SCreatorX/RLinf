@@ -1,0 +1,30 @@
+# Two FSDP ranks, two LIBERO subprocesses, and one rollout replica.
+defaults:
+  - libero_spatial_ppo_openwam
+  - _self_
+
+runner:
+  max_epochs: 2
+  max_steps: 2
+  save_interval: -1
+  logger:
+    experiment_name: libero_spatial_ppo_openwam_smoke
+
+env:
+  train:
+    rollout_epoch: 1
+    total_num_envs: 2
+    max_episode_steps: 64
+    max_steps_per_rollout_epoch: 64
+    video_cfg:
+      save_video: false
+
+actor:
+  micro_batch_size: 1
+  global_batch_size: 4
+  model:
+    denoise_steps: 2
+
+rollout:
+  model:
+    denoise_steps: 2
