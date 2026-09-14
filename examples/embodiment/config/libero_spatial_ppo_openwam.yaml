@@ -103,6 +103,8 @@ rollout:
     model_path: "/mnt/data/wangyuran/openwam_checkpoints/openwam-libero-sft-30000"
     precision: bf16
     device: cuda
+    is_lora: false
+    load_to_device: false
     num_frames: 33
     denoise_steps: 4
     action_dim: 10
@@ -120,6 +122,8 @@ actor:
     model_path: "/mnt/data/wangyuran/openwam_checkpoints/openwam-libero-sft-30000"
     precision: bf16
     device: cuda
+    is_lora: false
+    load_to_device: false
     num_frames: 33
     denoise_steps: 4
     action_dim: 10
