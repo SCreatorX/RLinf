@@ -181,6 +181,16 @@ def test_openwam_libero_action_adapter_smoke():
 
 
 
+def test_openwam_libero_action_adapter_rejects_nonfinite_values():
+    pose = np.array([[0.1, 0.2, 0.3, 1, 0, 0, 0, 1, 0, 1]], dtype=np.float32)
+    invalid = pose.copy()
+    invalid[0, 0] = np.nan
+    with pytest.raises(ValueError, match="non-finite"):
+        _openwam_absolute_eef10_to_libero7(invalid, pose)
+    with pytest.raises(ValueError, match="non-finite"):
+        _openwam_eef10_to_libero7(invalid)
+
+
 def test_openwam_encoder_path_override_stages_checkpoint(tmp_path):
     checkpoint = tmp_path / "checkpoint"
     checkpoint.mkdir()

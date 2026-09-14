@@ -122,6 +122,11 @@ def _openwam_absolute_eef10_to_libero7(
         raise ValueError(
             f"OpenWAM action/reference batch mismatch: {raw.shape} vs {ref.shape}"
         )
+    if not np.all(np.isfinite(raw)) or not np.all(np.isfinite(ref)):
+        raise ValueError(
+            "OpenWAM absolute EEF action/reference contains non-finite values; "
+            "refusing to send NaN or Inf into the LIBERO controller."
+        )
     if not (pos_scale > 0 and rot_scale > 0):
         raise ValueError(f"OSC scales must be positive, got {pos_scale=} {rot_scale=}")
 
@@ -160,6 +165,11 @@ def _openwam_eef10_to_libero7(raw_chunk_actions: np.ndarray) -> np.ndarray:
     if raw.shape[-1] != 10:
         raise ValueError(
             f"OpenWAM LIBERO rollout expects 10-D EEF actions, got {raw.shape}"
+        )
+    if not np.all(np.isfinite(raw)):
+        raise ValueError(
+            "OpenWAM EEF action contains non-finite values; refusing to send "
+            "NaN or Inf into the LIBERO controller."
         )
     r6d = raw[..., 3:9].reshape(-1, 6).astype(np.float64)
     first = r6d[:, :3]
