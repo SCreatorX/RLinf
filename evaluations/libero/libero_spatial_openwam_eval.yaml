@@ -37,7 +37,8 @@ env:
   eval:
     rollout_epoch: 1
     # Two subprocess environments share the dedicated env worker/GPU.
-    total_num_envs: 2
+    total_num_envs: 3
+    render_gpu_ids: [0, 2, 3] # one EGL renderer per GPU, none on the rollout GPU (1)
     auto_reset: true
     ignore_terminations: true
     max_episode_steps: 600
