@@ -203,10 +203,30 @@ class LiberoEnv(gym.Env):
 
         current_type_val = get_libero_type()
 
-        for env_fn_param in env_fn_params:
+        # Optional: spread the LIBERO subprocess renderers over several GPUs.
+        # Each child keeps one EGL context; many contexts rendering on one
+        # device abort inside MuJoCo, so the native OpenWAM runner pins each
+        # client to its own render device the same way.
+        render_gpu_ids = self.cfg.get("render_gpu_ids", None)
+        render_gpu_ids = (
+            [int(gpu) for gpu in render_gpu_ids] if render_gpu_ids else None
+        )
 
-            def env_fn(param=env_fn_param, _type_val=current_type_val):
+        for env_index, env_fn_param in enumerate(env_fn_params):
+            render_gpu = (
+                None
+                if render_gpu_ids is None
+                else render_gpu_ids[
+                    (self.seed_offset * self.num_envs + env_index) % len(render_gpu_ids)
+                ]
+            )
+
+            def env_fn(
+                param=env_fn_param, _type_val=current_type_val, _render_gpu=render_gpu
+            ):
                 os.environ["LIBERO_TYPE"] = _type_val
+                if _render_gpu is not None:
+                    os.environ["MUJOCO_EGL_DEVICE_ID"] = str(_render_gpu)
                 seed = param.pop("seed")
 
                 if _type_val in ["pro", "plus"]:
