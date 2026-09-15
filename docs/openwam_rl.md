@@ -16,9 +16,11 @@ The PPO bridge dispatches on the checkpoint's architecture, so every OpenWAM arc
 | dual_system `joint_cross_attn`, `idm` | validated at model level |
 | single_system `vanilla`, `moe` | validated at model level |
 | tri_system `joint_self_attn` (Qwen3-VL) | validated at model level; the frozen VLM is run once per observation and its hidden states are replayed |
-| Wan2.1 VACE 1.3B, Wan2.1 I2V 14B | validated at model level (the 14B model needs multi-GPU FSDP for actor replay) |
+| Wan2.1 VACE 1.3B, Wan2.1 I2V 14B | validated at model level (a single 14B replay sample peaks at about 117 GB on one GPU; use FSDP across actor ranks) |
 | Cosmos3 Edge | replay path validated; the study checkpoint's `state_dim: 80` does not match its 20-D `normalization_stats.npy`, so it cannot be used with a normalizer as shipped |
 | Cosmos-Predict2.5 | untested: requires OpenWAM's `install_cosmos_predict25.sh` extras |
+
+`toolkits/openwam/check_ppo_replay.py` runs this check for one checkpoint and writes the metrics as JSON; use it before enabling PPO on a checkpoint family that is not listed above.
 
 A tri-system checkpoint must keep its VLM frozen (`requires_grad=False`, the OpenWAM default); PPO raises otherwise because the cached VLM features would go stale.
 
