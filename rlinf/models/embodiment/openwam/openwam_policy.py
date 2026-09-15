@@ -277,6 +277,12 @@ class OpenWAMPolicy(nn.Module, BasePolicy):
             if compute_entropy
             else None
         )
+        if self.inference_horizon is not None:
+            # Only the executed prefix of the chunk is the RL action; the
+            # unexecuted tail is regenerated at the next step.
+            logprobs = logprobs[:, : self.inference_horizon]
+            if entropy is not None:
+                entropy = entropy[:, : self.inference_horizon]
         return {
             "logprobs": logprobs.float(),
             "values": values.float(),
@@ -591,7 +597,10 @@ class OpenWAMPolicy(nn.Module, BasePolicy):
             per_record_scores.append(
                 self.rl_forward(record_inputs, compute_values=True)
             )
-        return torch.stack(outputs), {
+        executed = torch.stack(outputs)
+        if self.inference_horizon is not None:
+            executed = executed[:, : self.inference_horizon]
+        return executed, {
             "prev_logprobs": torch.cat(
                 [score["logprobs"].detach() for score in per_record_scores], dim=0
             ),

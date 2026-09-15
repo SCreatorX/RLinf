@@ -943,8 +943,16 @@ def validate_embodied_cfg(cfg):
         assert int(model_cfg.get("denoise_steps", 0)) >= 2, (
             "OpenWAM PPO requires actor.model.denoise_steps >= 2."
         )
-        assert int(model_cfg.get("num_action_chunks", 0)) == int(model_cfg.num_frames) - 1, (
-            "OpenWAM PPO requires num_action_chunks == num_frames - 1."
+        openwam_cfg = model_cfg.get("openwam", {}) or {}
+        inference_horizon = openwam_cfg.get("inference_horizon", None)
+        executed_chunk = (
+            int(model_cfg.num_frames) - 1
+            if inference_horizon is None
+            else int(inference_horizon)
+        )
+        assert int(model_cfg.get("num_action_chunks", 0)) == executed_chunk, (
+            "OpenWAM PPO requires num_action_chunks == num_frames - 1, or == "
+            "actor.model.openwam.inference_horizon when a receding horizon is set."
         )
         assert cfg.rollout.get("return_logprobs", False), (
             "OpenWAM PPO requires rollout.return_logprobs=True."

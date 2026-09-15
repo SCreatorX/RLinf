@@ -269,7 +269,10 @@ def test_openwam_replay_survives_flat_trajectory_transport():
 
 
 @pytest.mark.parametrize("tri_system", [False, True])
-def test_openwam_architecture_rollout_replay_and_backward(monkeypatch, tri_system):
+@pytest.mark.parametrize("horizon", [None, 1])
+def test_openwam_architecture_rollout_replay_and_backward(
+    monkeypatch, tri_system, horizon
+):
     # The external OpenWAM scheduler returns real (unrounded) schedule values.
     schedule = ModuleType("openwam.deploy.denoise_schedule")
     schedule.make_schedule = lambda *args, **kwargs: [
@@ -342,6 +345,7 @@ def test_openwam_architecture_rollout_replay_and_backward(monkeypatch, tri_syste
         width=8,
         denoise_steps=2,
         replay_text_capacity=8,
+        inference_horizon=horizon,
     )
     obs = {
         "images": np.zeros((2, 8, 8, 3), dtype=np.uint8),
@@ -349,7 +353,11 @@ def test_openwam_architecture_rollout_replay_and_backward(monkeypatch, tri_syste
         "task_descriptions": ["ab", "abcd"],
     }
     actions, extra = policy.predict_action_batch(obs, mode="train")
-    assert actions.shape == (2, 2, 20)
+    executed = 2 if horizon is None else horizon
+    assert actions.shape == (2, executed, 20)
+    assert extra["prev_logprobs"].shape[1] == executed
+    # The replay inputs keep the full chain so the actor can rescore it.
+    assert extra["forward_inputs"]["chains"].shape[2] == 2
     assert all(
         isinstance(value, torch.Tensor) for value in extra["forward_inputs"].values()
     )
