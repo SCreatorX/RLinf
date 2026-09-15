@@ -28,6 +28,7 @@ import numpy as np
 import pytest
 import torch
 from omegaconf import OmegaConf
+from safetensors.torch import load_file, save_file
 
 from rlinf.algorithms.losses import compute_ppo_critic_loss
 from rlinf.config import SupportedModel
@@ -60,6 +61,10 @@ from rlinf.utils.env_helpers.delay_sampler import (
     ExponentialDelaySampler,
     GaussianDelaySampler,
     UniformDelaySampler,
+)
+from toolkits.openwam.export_ppo_checkpoint import (
+    export_checkpoint,
+    infer_step,
 )
 
 
@@ -1025,3 +1030,89 @@ def test_openwam_rl_forward_rescores_and_backpropagates():
     (-result["logprobs"].mean() + result["values"].mean()).backward()
     assert policy.engine.architecture.weight.grad is not None
     assert policy.value_head[0].weight.grad is not None
+
+
+# --- OpenWAM PPO checkpoint export -----------------------------------------
+
+
+def _make_source(tmp_path: Path) -> Path:
+    source = tmp_path / "openwam-sft"
+    (source / "tokenizer").mkdir(parents=True)
+    (source / "tokenizer" / "tokenizer.json").write_text("{}")
+    (source / "config.yaml").write_text("model:\n  architecture: dual_system\n")
+    np.save(source / "normalization_stats.npy", np.zeros(3, dtype=np.float32))
+    save_file(
+        {
+            "action_backbone.weight": torch.zeros(2, 2),
+            "video_backbone.bias": torch.zeros(2),
+            "vlm_backbone.ignored": torch.zeros(1),
+        },
+        str(source / "checkpoint_step_30000.safetensors"),
+    )
+    return source
+
+
+def _make_rlinf_checkpoint(tmp_path: Path, extra: dict | None = None) -> Path:
+    step_dir = tmp_path / "results" / "checkpoints" / "global_step_7"
+    (step_dir / "actor" / "model_state_dict").mkdir(parents=True)
+    state = {
+        "architecture.action_backbone.weight": torch.full((2, 2), 3.0),
+        "architecture.video_backbone.bias": torch.full((2,), 4.0),
+        "architecture.vlm_backbone.ignored": torch.ones(1),
+        "value_head.0.weight": torch.ones(1, 8),
+    }
+    state.update(extra or {})
+    torch.save(state, step_dir / "actor" / "model_state_dict" / "full_weights.pt")
+    return step_dir
+
+
+def test_openwam_export_rebuilds_native_checkpoint_dir(tmp_path):
+    source = _make_source(tmp_path)
+    step_dir = _make_rlinf_checkpoint(tmp_path)
+    out = tmp_path / "openwam-ppo"
+
+    written = export_checkpoint(step_dir, source, out)
+
+    assert written == out / "checkpoint_step_7.safetensors"
+    exported = load_file(str(written))
+    assert set(exported) == {"action_backbone.weight", "video_backbone.bias"}
+    assert torch.equal(exported["action_backbone.weight"], torch.full((2, 2), 3.0))
+    assert (out / "config.yaml").read_text() == (source / "config.yaml").read_text()
+    assert (out / "tokenizer" / "tokenizer.json").is_file()
+    assert (out / "normalization_stats.npy").is_file()
+    assert not list(out.glob("checkpoint_step_30000*"))
+    value_head = torch.load(out / "rlinf_value_head.pt")
+    assert set(value_head) == {"value_head.0.weight"}
+
+
+def test_openwam_export_rejects_foreign_source(tmp_path):
+    source = _make_source(tmp_path)
+    step_dir = _make_rlinf_checkpoint(
+        tmp_path, {"architecture.action_backbone.extra": torch.zeros(1)}
+    )
+    with pytest.raises(ValueError, match="differ from the source"):
+        export_checkpoint(step_dir, source, tmp_path / "out")
+    written = export_checkpoint(
+        step_dir, source, tmp_path / "out", allow_key_mismatch=True
+    )
+    assert "action_backbone.extra" in load_file(str(written))
+
+
+def test_openwam_export_links_assets_and_infers_step(tmp_path):
+    source = _make_source(tmp_path)
+    step_dir = _make_rlinf_checkpoint(tmp_path)
+    assert infer_step(step_dir) == 7
+    out = tmp_path / "linked"
+    export_checkpoint(step_dir, source, out, step=12, link_assets=True)
+    assert (out / "tokenizer").is_symlink()
+    assert (out / "checkpoint_step_12.safetensors").is_file()
+    # A bare weights file outside a global_step_N directory needs --step.
+    bare = tmp_path / "weights.pt"
+    bare.write_bytes(
+        (step_dir / "actor" / "model_state_dict" / "full_weights.pt").read_bytes()
+    )
+    assert infer_step(bare) is None
+    with pytest.raises(ValueError, match="--step"):
+        export_checkpoint(bare, source, tmp_path / "nostep")
+    written = export_checkpoint(bare, source, tmp_path / "bare", step=3)
+    assert written.name == "checkpoint_step_3.safetensors"

@@ -1,0 +1,45 @@
+# OpenWAM (Wan2.2 dual-system) PPO on LIBERO-Spatial, shortened for CI.
+# Run: bash tests/e2e_tests/embodied/run.sh libero_spatial_ppo_openwam \
+#        rollout.model.model_path=... actor.model.model_path=...
+defaults:
+  - libero_spatial_ppo_openwam
+  - _self_
+
+hydra:
+  searchpath:
+    - file://${oc.env:REPO_PATH}/examples/embodiment/config
+
+cluster:
+  num_nodes: 1
+  component_placement:
+    actor: 0-1
+    env: 2
+    rollout: 3
+
+runner:
+  max_epochs: 2
+  max_steps: 2
+  save_interval: 2
+  logger:
+    log_path: "../results/libero_spatial_ppo_openwam"
+    experiment_name: "test_openwam"
+
+env:
+  train:
+    rollout_epoch: 1
+    total_num_envs: 2
+    max_episode_steps: 64
+    max_steps_per_rollout_epoch: 64
+    video_cfg:
+      save_video: false
+
+rollout:
+  model:
+    denoise_steps: 2
+
+actor:
+  micro_batch_size: 1
+  # One optimizer step per rollout: 2 envs x (64 / 32 action chunks).
+  global_batch_size: 4
+  model:
+    denoise_steps: 2
