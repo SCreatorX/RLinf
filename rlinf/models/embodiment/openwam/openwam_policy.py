@@ -300,10 +300,27 @@ class OpenWAMPolicy(nn.Module, BasePolicy):
             records.append(flat)
             outputs.append(torch.as_tensor(physical, device=device, dtype=torch.float32))
         forward_inputs = _stack_flat_records(records)
-        scored = self.rl_forward(forward_inputs, compute_values=True)
-        return torch.stack(outputs), {"prev_logprobs": scored["logprobs"].detach(),
-                                     "prev_values": scored["values"].detach().unsqueeze(-1),
-                                     "forward_inputs": forward_inputs}
+        # Rollout sampling is performed one observation at a time.  Keep the
+        # behavior policy score in that same batch shape: the Wan attention
+        # path can produce slightly different bf16 results for batch=1 versus
+        # batch>1, and actor training commonly uses micro_batch_size=1.
+        # Scoring the stacked batch here would make PPO ratios non-unit even
+        # before an optimizer update.
+        per_record_scores = []
+        for index in range(batch_size):
+            record_inputs = {
+                key: value[index : index + 1] for key, value in forward_inputs.items()
+            }
+            per_record_scores.append(self.rl_forward(record_inputs, compute_values=True))
+        return torch.stack(outputs), {
+            "prev_logprobs": torch.cat(
+                [score["logprobs"].detach() for score in per_record_scores], dim=0
+            ),
+            "prev_values": torch.cat(
+                [score["values"].detach().unsqueeze(-1) for score in per_record_scores], dim=0
+            ),
+            "forward_inputs": forward_inputs,
+        }
 
 
 @contextmanager
