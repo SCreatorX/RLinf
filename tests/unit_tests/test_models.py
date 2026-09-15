@@ -47,8 +47,11 @@ from rlinf.models.embodiment.openwam.openwam_policy import (
     _checkpoint_with_encoder_override,
     _infer_batch_size,
     _libero_state_to_eef10,
-    _stack_flat_records,
     _to_pil,
+)
+from rlinf.models.embodiment.openwam.replay import (
+    pack_native_inputs,
+    unpack_native_inputs,
 )
 from rlinf.utils.env_helpers import HistoryManager
 from rlinf.utils.env_helpers.delay_sampler import (
@@ -99,7 +102,9 @@ def openwam_recipe(monkeypatch):
     config_dir = Path(__file__).resolve().parents[2] / "examples/embodiment/config"
 
     def load(name, overrides=None):
-        with hydra.initialize_config_dir(version_base="1.1", config_dir=str(config_dir)):
+        with hydra.initialize_config_dir(
+            version_base="1.1", config_dir=str(config_dir)
+        ):
             return hydra.compose(config_name=name, overrides=overrides or [])
 
     return load
@@ -181,7 +186,6 @@ def test_openwam_libero_action_adapter_smoke():
     assert converted[0, 6] == -1.0
 
 
-
 def test_openwam_libero_action_adapter_rejects_nonfinite_values():
     pose = np.array([[0.1, 0.2, 0.3, 1, 0, 0, 0, 1, 0, 1]], dtype=np.float32)
     invalid = pose.copy()
@@ -204,7 +208,9 @@ def test_openwam_encoder_path_override_stages_checkpoint(tmp_path):
     encoder = tmp_path / "encoder"
     encoder.mkdir()
 
-    with _checkpoint_with_encoder_override(str(checkpoint), str(encoder)) as staged_path:
+    with _checkpoint_with_encoder_override(
+        str(checkpoint), str(encoder)
+    ) as staged_path:
         staged = Path(staged_path)
         cfg = OmegaConf.load(staged / "config.yaml")
         assert cfg.model.video_backbone.encoder.model_path == str(encoder.resolve())
@@ -213,24 +219,149 @@ def test_openwam_encoder_path_override_stages_checkpoint(tmp_path):
 
     assert not Path(staged_path).exists()
 
-def test_openwam_nested_vlm_rollout_records_stack_batch():
-    records = []
-    for index in range(2):
-        records.append(
-            {
-                "native__vlm_inputs": {
-                    "input_ids": torch.tensor([[index + 1, index + 2]], dtype=torch.long),
-                    "pixel_values": torch.full((1, 2, 2), float(index)),
-                },
-                "native__latents": torch.full((1, 3), float(index)),
-            }
-        )
 
-    stacked = _stack_flat_records(records)
-    assert stacked["native__vlm_inputs"]["input_ids"].shape == (2, 2)
-    assert stacked["native__vlm_inputs"]["input_ids"].dtype == torch.long
-    assert stacked["native__vlm_inputs"]["pixel_values"].shape == (2, 2, 2)
-    assert stacked["native__latents"].shape == (2, 3)
+def test_openwam_replay_survives_flat_trajectory_transport():
+    records = []
+    for length in (2, 4):
+        native = {
+            "latents": torch.zeros(1, 1, 2, 2, 2),
+            "context": torch.arange(length * 3).reshape(1, length, 3).float(),
+            "seq_lens": torch.tensor([length], dtype=torch.long),
+            "und_kv": [(torch.ones(1, length, 2, 3), torch.zeros(1, length, 2, 3))],
+            "vision_positions": torch.arange(12).reshape(3, 1, 4),
+            "num_clean_prefix_frames": 1,
+            "cfg_merge": False,
+            "und_mask": None,
+        }
+        records.append(pack_native_inputs(native, text_capacity=8))
+    assert all(
+        isinstance(value, torch.Tensor)
+        for record in records
+        for value in record.values()
+    )
+    # Rollout workers split flat tensors on B; trajectories stack on T, then
+    # actor training flattens T/B and shuffles samples.
+    batch = {
+        key: torch.stack([record[key] for record in records]) for key in records[0]
+    }
+    time_batch = {key: torch.stack([value, value]) for key, value in batch.items()}
+    shuffled = {
+        key: value.flatten(0, 1)[torch.tensor([1, 0, 3, 2])]
+        for key, value in time_batch.items()
+    }
+    restored = unpack_native_inputs({key: value[0] for key, value in shuffled.items()})
+    assert restored["context"].shape == (1, 4, 3)
+    assert isinstance(restored["und_kv"], list)
+    assert isinstance(restored["und_kv"][0], tuple)
+    assert restored["und_kv"][0][0].shape == (1, 4, 2, 3)
+    assert restored["vision_positions"].shape == (3, 1, 4)
+    assert restored["seq_lens"].dtype == torch.long
+    assert restored["num_clean_prefix_frames"] == 1
+    assert restored["cfg_merge"] is False
+    assert restored["und_mask"] is None
+    with pytest.raises(ValueError, match="exceeds replay capacity"):
+        pack_native_inputs(native, text_capacity=2)
+
+
+@pytest.mark.parametrize("tri_system", [False, True])
+def test_openwam_architecture_rollout_replay_and_backward(monkeypatch, tri_system):
+    # The external OpenWAM scheduler returns real (unrounded) schedule values.
+    schedule = ModuleType("openwam.deploy.denoise_schedule")
+    schedule.make_schedule = lambda *args, **kwargs: [
+        (1000.0, 1000.0),
+        (909.09, 909.09),
+        (0.0, 0.0),
+    ]
+    monkeypatch.setitem(sys.modules, "openwam.deploy.denoise_schedule", schedule)
+
+    class VideoBackbone(torch.nn.Module):
+        def preprocess_input_for_inference(self, **kwargs):
+            length = len(kwargs["prompt"])
+            return {
+                "latents": torch.zeros(1, 1, 2, 2, 2),
+                "first_frame_latents": torch.ones(1, 1, 1, 2, 2),
+                "context": torch.ones(1, length, 3),
+                "und_kv": [(torch.ones(1, length, 1, 3), torch.zeros(1, length, 1, 3))],
+                "vision_positions": torch.arange(12).reshape(3, 1, 4),
+                "num_clean_prefix_frames": 1,
+                "seq_lens": torch.tensor([length]),
+            }
+
+    class FrozenVLM(torch.nn.Module):
+        def __init__(self):
+            super().__init__()
+            self.weight = torch.nn.Parameter(torch.ones(()), requires_grad=False)
+            self.calls = 0
+
+        def prepare_vlm_inputs(self, prompts, images):
+            return {"attention_mask": torch.ones(1, len(prompts[0]), dtype=torch.long)}
+
+        def extract_features(self, inputs):
+            self.calls += 1
+            return torch.ones(1, inputs["attention_mask"].shape[1], 4)
+
+    class OtherArchitecture(torch.nn.Module):
+        def __init__(self):
+            super().__init__()
+            self.weight = torch.nn.Parameter(torch.tensor(0.1))
+            self.video_backbone = VideoBackbone()
+            self.action_backbone = SimpleNamespace(shift_action=5.0)
+            self.action_scheduler = SimpleNamespace(num_train_timesteps=1000)
+            self.video_scheduler = SimpleNamespace(num_train_timesteps=1000)
+            self.action_dim = 20
+            self.uses_proprioception = True
+            if tri_system:
+                self.vlm_backbone = FrozenVLM()
+
+        def normalize_deploy_proprio(self, value):
+            assert value.shape == (20,)
+            return torch.from_numpy(value)
+
+        def forward(self, action, action_timestep, *, latents, proprio, **native):
+            assert native["num_clean_prefix_frames"] == 1
+            assert torch.equal(latents[:, :, :1], native["first_frame_latents"])
+            assert native["vision_positions"].shape == (3, 1, 4)
+            assert isinstance(native["und_kv"][0], tuple)
+            length = native["context"].shape[1]
+            assert native["und_kv"][0][0].shape[1] == length
+            if tri_system:
+                assert native["vlm_hidden"].shape[1] == length
+                assert native["vlm_attention_mask"].shape == (1, length)
+            return torch.ones_like(latents), action * self.weight
+
+    architecture = OtherArchitecture()
+    policy = OpenWAMPolicy(
+        SimpleNamespace(architecture=architecture),
+        num_frames=3,
+        height=8,
+        width=8,
+        denoise_steps=2,
+        replay_text_capacity=8,
+    )
+    obs = {
+        "images": np.zeros((2, 8, 8, 3), dtype=np.uint8),
+        "native_proprio": np.zeros((2, 20), dtype=np.float32),
+        "task_descriptions": ["ab", "abcd"],
+    }
+    actions, extra = policy.predict_action_batch(obs, mode="train")
+    assert actions.shape == (2, 2, 20)
+    assert all(
+        isinstance(value, torch.Tensor) for value in extra["forward_inputs"].values()
+    )
+    policy.train()
+    replay = policy(forward_inputs=extra["forward_inputs"], compute_entropy=True)
+    torch.testing.assert_close(
+        replay["logprobs"], extra["prev_logprobs"], rtol=0, atol=0
+    )
+    loss = -replay["logprobs"].mean() + replay["values"].square().mean()
+    loss.backward()
+    assert torch.isfinite(architecture.weight.grad)
+    assert architecture.weight.grad.abs() > 0
+    if tri_system:
+        assert architecture.vlm_backbone.calls == 2
+        architecture.vlm_backbone.weight.requires_grad_(True)
+        with pytest.raises(NotImplementedError, match="frozen VLM"):
+            policy.predict_action_batch(obs, mode="train")
 
 
 def test_openwam_sft_forward_delegates_native_loss():
@@ -851,6 +982,7 @@ def test_delay_metrics_report_every_sample():
 
 def test_openwam_rl_forward_rescores_and_backpropagates():
     """The RL contract must produce finite scores and gradients on both heads."""
+
     class _Architecture(torch.nn.Module):
         action_dim = 4
         uses_proprioception = True
@@ -861,11 +993,15 @@ def test_openwam_rl_forward_rescores_and_backpropagates():
 
         def forward(self, action, action_timestep, proprio=None, **inputs):
             del action_timestep, proprio
-            return torch.zeros_like(inputs["latents"]) + self.weight, action * 0 + self.weight
+            return torch.zeros_like(
+                inputs["latents"]
+            ) + self.weight, action * 0 + self.weight
 
     engine = SimpleNamespace(
         architecture=_Architecture(),
-        cfg=SimpleNamespace(dataloader=SimpleNamespace(multiview=False, camera_layout=[])),
+        cfg=SimpleNamespace(
+            dataloader=SimpleNamespace(multiview=False, camera_layout=[])
+        ),
     )
     policy = OpenWAMPolicy(engine, num_frames=3, height=4, width=4, denoise_steps=2)
     forward_inputs = {

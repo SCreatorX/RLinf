@@ -39,6 +39,9 @@ def get_model(cfg: DictConfig, torch_dtype: torch.dtype | None = None) -> OpenWA
         lambda_video=float(cfg.get("lambda_video", 1.0)),
         lambda_action=float(cfg.get("lambda_action", 1.0)),
         noise_std=float((cfg.get("openwam", {}) or {}).get("noise_std", 0.05)),
+        replay_text_capacity=int(
+            (cfg.get("openwam", {}) or {}).get("replay_text_capacity", 512)
+        ),
         encoder_model_path=(
             str(cfg.get("encoder_model_path"))
             if cfg.get("encoder_model_path") is not None

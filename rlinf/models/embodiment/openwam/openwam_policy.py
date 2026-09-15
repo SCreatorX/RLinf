@@ -18,7 +18,6 @@ from __future__ import annotations
 
 import os
 import tempfile
-from collections.abc import Mapping
 from contextlib import contextmanager
 from pathlib import Path
 from typing import Any, Iterator
@@ -29,14 +28,28 @@ import torch.nn as nn
 from PIL import Image
 
 from rlinf.models.embodiment.base_policy import BasePolicy, ForwardType
+from rlinf.models.embodiment.openwam.replay import (
+    pack_native_inputs,
+    unpack_native_inputs,
+)
 
 
 class OpenWAMPolicy(nn.Module, BasePolicy):
     """RLinf adapter for OpenWAM inference and native SFT training."""
 
-    def __init__(self, engine: Any, *, num_frames: int, height: int, width: int, denoise_steps: int,
-                 lambda_video: float = 1.0, lambda_action: float = 1.0,
-                 noise_std: float = 0.05):
+    def __init__(
+        self,
+        engine: Any,
+        *,
+        num_frames: int,
+        height: int,
+        width: int,
+        denoise_steps: int,
+        lambda_video: float = 1.0,
+        lambda_action: float = 1.0,
+        noise_std: float = 0.05,
+        replay_text_capacity: int = 512,
+    ):
         super().__init__()
         self.engine = engine
         self.num_frames = num_frames
@@ -48,24 +61,40 @@ class OpenWAMPolicy(nn.Module, BasePolicy):
         if noise_std <= 0:
             raise ValueError(f"OpenWAM PPO noise_std must be positive, got {noise_std}")
         self.noise_std = float(noise_std)
+        self.replay_text_capacity = int(replay_text_capacity)
+        if self.replay_text_capacity <= 0:
+            raise ValueError("OpenWAM replay_text_capacity must be positive")
         self.architecture = engine.architecture
         engine_cfg = getattr(engine, "cfg", None)
         dataloader_cfg = getattr(engine_cfg, "dataloader", None)
         self._multiview = bool(getattr(dataloader_cfg, "multiview", False))
         layout = getattr(dataloader_cfg, "camera_layout", None)
-        self._camera_layout = list(layout) if layout is not None else [
-            "head_camera", "left_camera", "right_camera"
-        ]
+        self._camera_layout = (
+            list(layout)
+            if layout is not None
+            else ["head_camera", "left_camera", "right_camera"]
+        )
         # PPO value features include pooled visual latents and proprioception.
         self.value_head = nn.Sequential(nn.Linear(8, 128), nn.SiLU(), nn.Linear(128, 1))
 
     @classmethod
-    def from_checkpoint(cls, model_path: str, *, ckpt_name: str | None, device: str,
-                        torch_dtype: torch.dtype | None, num_frames: int, height: int,
-                        width: int, denoise_steps: int, lambda_video: float = 1.0,
-                        lambda_action: float = 1.0,
-                        encoder_model_path: str | None = None,
-                        noise_std: float = 0.05) -> "OpenWAMPolicy":
+    def from_checkpoint(
+        cls,
+        model_path: str,
+        *,
+        ckpt_name: str | None,
+        device: str,
+        torch_dtype: torch.dtype | None,
+        num_frames: int,
+        height: int,
+        width: int,
+        denoise_steps: int,
+        lambda_video: float = 1.0,
+        lambda_action: float = 1.0,
+        encoder_model_path: str | None = None,
+        noise_std: float = 0.05,
+        replay_text_capacity: int = 512,
+    ) -> "OpenWAMPolicy":
         """Build OpenWAM's checkpoint loader and joint inference engine."""
         from omegaconf import OmegaConf
         from openwam.deploy import JointInferenceEngine, load_from_checkpoint_dir
@@ -75,7 +104,9 @@ class OpenWAMPolicy(nn.Module, BasePolicy):
         # (DINOv3, Flux VAE, V-JEPA) are not always copied into the deploy
         # bundle, so allow the eval config to repoint that one dependency while
         # keeping the checkpoint itself immutable.
-        with _checkpoint_with_encoder_override(model_path, encoder_model_path) as load_dir:
+        with _checkpoint_with_encoder_override(
+            model_path, encoder_model_path
+        ) as load_dir:
             cfg, architecture = load_from_checkpoint_dir(
                 load_dir, device=device, ckpt_name=ckpt_name
             )
@@ -90,20 +121,43 @@ class OpenWAMPolicy(nn.Module, BasePolicy):
         training_cfg = OmegaConf.select(cfg, "training", default=OmegaConf.create({}))
         architecture.init_training_schedulers(1000)
         architecture.set_training_runtime(
-            use_gradient_checkpointing=bool(OmegaConf.select(training_cfg, "use_gradient_checkpointing", default=False)),
-            use_gradient_checkpointing_offload=bool(OmegaConf.select(training_cfg, "use_gradient_checkpointing_offload", default=False)),
-            max_timestep_boundary=float(OmegaConf.select(training_cfg, "max_timestep_boundary", default=1.0)),
-            min_timestep_boundary=float(OmegaConf.select(training_cfg, "min_timestep_boundary", default=0.0)),
+            use_gradient_checkpointing=bool(
+                OmegaConf.select(
+                    training_cfg, "use_gradient_checkpointing", default=False
+                )
+            ),
+            use_gradient_checkpointing_offload=bool(
+                OmegaConf.select(
+                    training_cfg, "use_gradient_checkpointing_offload", default=False
+                )
+            ),
+            max_timestep_boundary=float(
+                OmegaConf.select(training_cfg, "max_timestep_boundary", default=1.0)
+            ),
+            min_timestep_boundary=float(
+                OmegaConf.select(training_cfg, "min_timestep_boundary", default=0.0)
+            ),
         )
-        model = cls(JointInferenceEngine(cfg=cfg, architecture=architecture),
-                    num_frames=num_frames, height=height, width=width,
-                    denoise_steps=denoise_steps, lambda_video=lambda_video,
-                    lambda_action=lambda_action, noise_std=noise_std)
-        model.to(device=device, dtype=torch_dtype or next(architecture.parameters()).dtype)
+        model = cls(
+            JointInferenceEngine(cfg=cfg, architecture=architecture),
+            num_frames=num_frames,
+            height=height,
+            width=width,
+            denoise_steps=denoise_steps,
+            lambda_video=lambda_video,
+            lambda_action=lambda_action,
+            noise_std=noise_std,
+            replay_text_capacity=replay_text_capacity,
+        )
+        model.to(
+            device=device, dtype=torch_dtype or next(architecture.parameters()).dtype
+        )
         return model
 
     def forward(self, forward_type: ForwardType = ForwardType.DEFAULT, **kwargs):
-        if forward_type == ForwardType.SFT or (forward_type == ForwardType.DEFAULT and "data" in kwargs):
+        if forward_type == ForwardType.SFT or (
+            forward_type == ForwardType.DEFAULT and "data" in kwargs
+        ):
             return self.sft_forward(**kwargs)
         return self.default_forward(**kwargs)
 
@@ -112,46 +166,118 @@ class OpenWAMPolicy(nn.Module, BasePolicy):
             return self.sft_forward(**kwargs)
         return self.rl_forward(**kwargs)
 
-    def rl_forward(self, forward_inputs, compute_logprobs=True, compute_values=True,
-                   compute_entropy=False, **kwargs):
+    def rl_forward(
+        self,
+        forward_inputs,
+        compute_logprobs=True,
+        compute_values=True,
+        compute_entropy=False,
+        **kwargs,
+    ):
         """Rescore the selected stochastic native denoising transition."""
         del kwargs
         chains = forward_inputs["chains"]
+        predictions = []
+        features = []
+        for index in range(chains.shape[0]):
+            chosen = int(forward_inputs["denoise_inds"][index, 0])
+            action_t = chains[index : index + 1, chosen]
+            if "native_schema" in forward_inputs:
+                native = unpack_native_inputs(
+                    {key: value[index] for key, value in forward_inputs.items()}
+                )
+            else:
+                # Read trajectories collected by earlier versions of the adapter.
+                native = {
+                    key[len("native__") :]: value[index : index + 1]
+                    for key, value in forward_inputs.items()
+                    if key.startswith("native__")
+                }
+            native["latents"] = forward_inputs["video_latents"][index : index + 1]
+            features.append(
+                self._value_features(
+                    {
+                        "video_latents": native["latents"],
+                        **{f"native__{key}": value for key, value in native.items()},
+                    },
+                    action_t,
+                )
+            )
+            proprio = native.pop("proprio", None)
+            action_timestep = (
+                forward_inputs["action_timesteps"][index].reshape(1).to(action_t.dtype)
+            )
+            video_timestep = (
+                forward_inputs["video_timesteps"][index].reshape(1).to(action_t.dtype)
+            )
+            _, prediction = self.architecture.forward(
+                action_t,
+                action_timestep,
+                proprio=proprio,
+                **native,
+                timestep=video_timestep,
+            )
+            if prediction is None or prediction.shape != action_t.shape:
+                raise ValueError(
+                    "OpenWAM PPO requires an action flow prediction matching the action shape"
+                )
+            predictions.append(prediction)
+        a_pred = torch.cat(predictions, dim=0)
         chosen = forward_inputs["denoise_inds"][:, 0].long()
         rows = torch.arange(chains.shape[0], device=chains.device)
         action_t, action_next = chains[rows, chosen], chains[rows, chosen + 1]
-        native = {k[len("native__"):]: v for k, v in forward_inputs.items() if k.startswith("native__")}
-        native["latents"] = forward_inputs["video_latents"]
-        proprio = native.pop("proprio", None)
-        action_timestep = forward_inputs["action_timesteps"].view(-1).to(action_t.dtype)
-        video_timestep = forward_inputs["video_timesteps"].view(-1).to(action_t.dtype)
-        _, a_pred = self.architecture.forward(action_t, action_timestep,
-                                               proprio=proprio, **native,
-                                               timestep=video_timestep)
-        sigma, sigma_next = forward_inputs["sigma"].view(-1), forward_inputs["sigma_next"].view(-1)
+        sigma, sigma_next = (
+            forward_inputs["sigma"].view(-1),
+            forward_inputs["sigma_next"].view(-1),
+        )
         mean = action_t + a_pred * (sigma_next - sigma).view(-1, 1, 1)
         std = forward_inputs["noise_std"].view(-1, 1, 1).clamp_min(1e-6)
         active = forward_inputs["active_action_indices"][0].long()
         if active.ndim != 1 or active.numel() == 0:
-            raise ValueError("OpenWAM PPO active_action_indices must be a non-empty vector")
+            raise ValueError(
+                "OpenWAM PPO active_action_indices must be a non-empty vector"
+            )
         if compute_logprobs:
-            all_logprobs = (-0.5 * ((action_next - mean) / std).square()
-                            - torch.log(std) - 0.5 * np.log(2.0 * np.pi))
+            all_logprobs = (
+                -0.5 * ((action_next - mean) / std).square()
+                - torch.log(std)
+                - 0.5 * np.log(2.0 * np.pi)
+            )
             logprobs = all_logprobs.index_select(-1, active)
         else:
-            logprobs = torch.zeros(action_next.shape[0], action_next.shape[1], active.numel(), device=action_next.device)
-        features = self._value_features(forward_inputs, action_t).to(next(self.value_head.parameters()).dtype)
+            logprobs = torch.zeros(
+                action_next.shape[0],
+                action_next.shape[1],
+                active.numel(),
+                device=action_next.device,
+            )
+        features = torch.cat(features, dim=0).to(
+            next(self.value_head.parameters()).dtype
+        )
         values = self.value_head(features).squeeze(-1)
         if not compute_values:
             values = torch.zeros(chains.shape[0], device=chains.device)
-        entropy = (torch.log(std) + 0.5 * np.log(2.0 * np.pi * np.e)).expand_as(logprobs) if compute_entropy else None
-        return {"logprobs": logprobs.float(), "values": values.float(), "entropy": entropy}
+        entropy = (
+            (torch.log(std) + 0.5 * np.log(2.0 * np.pi * np.e)).expand_as(logprobs)
+            if compute_entropy
+            else None
+        )
+        return {
+            "logprobs": logprobs.float(),
+            "values": values.float(),
+            "entropy": entropy,
+        }
 
     @staticmethod
     def _value_features(inputs, action):
         def stats(x):
-            x = x.float().flatten(1)
+            # Native proprio is a (D,) vector per observation; treat it as one sample.
+            x = x.float()
+            if x.ndim < 2:
+                x = x.unsqueeze(0)
+            x = x.flatten(1)
             return x.mean(1), x.std(1, unbiased=False)
+
         vm, vs = stats(inputs["video_latents"])
         context = inputs.get("native__context", inputs["video_latents"])
         cm, cs = stats(context)
@@ -165,11 +291,15 @@ class OpenWAMPolicy(nn.Module, BasePolicy):
         if data is None:
             data = kwargs.get("batch")
         if data is None:
-            raise ValueError("OpenWAM sft_forward requires `data` from the SFT dataloader.")
+            raise ValueError(
+                "OpenWAM sft_forward requires `data` from the SFT dataloader."
+            )
         if isinstance(data, dict):
             data = [data]
         if not isinstance(data, (list, tuple)):
-            raise TypeError(f"OpenWAM SFT data must be a sample list, got {type(data)!r}")
+            raise TypeError(
+                f"OpenWAM SFT data must be a sample list, got {type(data)!r}"
+            )
         inputs = self.architecture.prepare_inputs(list(data))
         result = self.architecture.compute_loss(
             **inputs,
@@ -182,7 +312,9 @@ class OpenWAMPolicy(nn.Module, BasePolicy):
             "loss_action": result.get("loss_action", result["loss"].detach()),
         }
 
-    def predict_action_batch(self, env_obs: dict[str, Any], mode: str = "eval", **kwargs):
+    def predict_action_batch(
+        self, env_obs: dict[str, Any], mode: str = "eval", **kwargs
+    ):
         """Generate one action chunk per observation in ``env_obs``."""
         if mode == "train":
             return self._predict_rl_batch(env_obs)
@@ -206,18 +338,26 @@ class OpenWAMPolicy(nn.Module, BasePolicy):
                 width=self.width,
             )
             condition = {
-                "prompt": _batch_value(env_obs, ("task_descriptions", "task_description", "language"), index, ""),
-                "first_frame_image": [image],
-                "proprio": _libero_state_to_eef10(
-                    _batch_value(env_obs, ("states", "state", "proprio"), index, None)
+                "prompt": _batch_value(
+                    env_obs,
+                    ("task_descriptions", "task_description", "language"),
+                    index,
+                    "",
                 ),
-                "num_frames": self.num_frames, "height": self.height, "width": self.width,
-                "denoise_steps": self.denoise_steps, "decode_video": False,
+                "first_frame_image": [image],
+                "proprio": _observation_proprio(env_obs, index),
+                "num_frames": self.num_frames,
+                "height": self.height,
+                "width": self.width,
+                "denoise_steps": self.denoise_steps,
+                "decode_video": False,
             }
             result = self.engine.generate(condition)
             actions.append(np.asarray(result["actions"]))
             results.append(result)
-        return torch.as_tensor(np.stack(actions), dtype=torch.float32), {"results": results}
+        return torch.as_tensor(np.stack(actions), dtype=torch.float32), {
+            "results": results
+        }
 
     @torch.no_grad()
     def _predict_rl_batch(self, env_obs):
@@ -239,89 +379,187 @@ class OpenWAMPolicy(nn.Module, BasePolicy):
         device, dtype = parameter.device, parameter.dtype
         action_dim = int(self.architecture.action_dim)
         for index in range(batch_size):
-            main = _to_pil(_batch_value(env_obs, ("main_images", "image", "images"), index))
+            main = _to_pil(
+                _batch_value(env_obs, ("main_images", "image", "images"), index)
+            )
             wrist = _batch_value(env_obs, ("wrist_images", "wrist_image"), index, None)
-            image = _compose_observation_image(main, _to_pil(wrist) if wrist is not None else None,
-                                                multiview=self._multiview, camera_layout=self._camera_layout,
-                                                height=self.height, width=self.width)
-            proprio = _libero_state_to_eef10(_batch_value(env_obs, ("states", "state", "proprio"), index, None))
-            action_shift = getattr(self.architecture.action_backbone, "shift_action", None) or 5.0
-            video_shift = getattr(self.architecture.video_backbone, "shift_video", None) or action_shift
+            image = _compose_observation_image(
+                main,
+                _to_pil(wrist) if wrist is not None else None,
+                multiview=self._multiview,
+                camera_layout=self._camera_layout,
+                height=self.height,
+                width=self.width,
+            )
+            proprio = _observation_proprio(env_obs, index)
+            action_shift = (
+                getattr(self.architecture.action_backbone, "shift_action", None) or 5.0
+            )
+            video_shift = (
+                getattr(self.architecture.video_backbone, "shift_video", None)
+                or action_shift
+            )
             native = self.architecture.video_backbone.preprocess_input_for_inference(
-                prompt=_batch_value(env_obs, ("task_descriptions", "task_description", "language"), index, ""),
-                first_frame_image=[image], num_frames=self.num_frames, height=self.height, width=self.width,
-                seed=42, num_inference_steps=steps, shift=float(video_shift), tiled=True,
-                cfg_scale=1.0, cfg_merge=False)
-            native = _move_tree(native, device=device)
-            # Tri-system MoT requires one VLM context per observation. Preserve
-            # token ids and processor-specific dtypes while moving tensors.
+                prompt=_batch_value(
+                    env_obs,
+                    ("task_descriptions", "task_description", "language"),
+                    index,
+                    "",
+                ),
+                first_frame_image=[image],
+                num_frames=self.num_frames,
+                height=self.height,
+                width=self.width,
+                seed=42,
+                num_inference_steps=steps,
+                shift=float(video_shift),
+                tiled=True,
+                cfg_scale=1.0,
+                cfg_merge=False,
+            )
+            # The native tri-system engine caches the frozen VLM once per
+            # observation; retain the same features for differentiable replay.
             vlm_backbone = getattr(self.architecture, "vlm_backbone", None)
             if vlm_backbone is not None:
+                if any(param.requires_grad for param in vlm_backbone.parameters()):
+                    raise NotImplementedError(
+                        "OpenWAM tri-system PPO requires a frozen VLM backbone"
+                    )
                 prompt = _batch_value(
                     env_obs,
                     ("task_descriptions", "task_description", "language"),
                     index,
                     "",
                 )
-                native["vlm_inputs"] = _move_tree(
-                    vlm_backbone.prepare_vlm_inputs([prompt], [image]),
-                    device=device,
-                )
+                vlm_inputs = vlm_backbone.prepare_vlm_inputs([prompt], [image])
+                native["vlm_hidden"] = vlm_backbone.extract_features(
+                    vlm_inputs
+                ).detach()
+                native["vlm_attention_mask"] = vlm_inputs.get("attention_mask")
+                if native["vlm_attention_mask"] is not None:
+                    native["vlm_attention_mask"] = native["vlm_attention_mask"].to(
+                        device
+                    )
             if getattr(self.architecture, "uses_proprioception", False):
-                native["proprio"] = self.architecture.normalize_deploy_proprio(proprio).to(device=device, dtype=dtype)
-            video = native["latents"]
-            action = torch.randn(1, max(1, self.num_frames - 1), action_dim, device=device, dtype=dtype)
+                native["proprio"] = self.architecture.normalize_deploy_proprio(
+                    proprio
+                ).to(device=device, dtype=dtype)
+            video = _restore_clean_prefix(
+                native["latents"], native.get("first_frame_latents")
+            )
+            native["latents"] = video
+            action = torch.randn(
+                1, max(1, self.num_frames - 1), action_dim, device=device, dtype=dtype
+            )
             from openwam.deploy.denoise_schedule import make_schedule
-            schedule = make_schedule("sync", self.architecture.video_scheduler,
-                                     self.architecture.action_scheduler, num_steps=steps,
-                                     shift=float(action_shift), shift_video=float(video_shift))
+
+            schedule = make_schedule(
+                "sync",
+                self.architecture.video_scheduler,
+                self.architecture.action_scheduler,
+                num_steps=steps,
+                shift=float(action_shift),
+                shift_video=float(video_shift),
+            )
             chosen = int(torch.randint(0, len(schedule) - 1, ()).item())
             chains = [action]
             selected_video = selected_sigma = selected_next = selected_std = None
             selected_action_timestep = selected_video_timestep = None
-            for step, ((tv, ta), (tv_next, ta_next)) in enumerate(zip(schedule[:-1], schedule[1:])):
-                sigma = torch.tensor([ta / self.architecture.action_scheduler.num_train_timesteps], device=device, dtype=dtype)
-                sigma_next = torch.tensor([ta_next / self.architecture.action_scheduler.num_train_timesteps], device=device, dtype=dtype)
-                video_sigma = torch.tensor([tv / self.architecture.video_scheduler.num_train_timesteps], device=device, dtype=dtype)
-                video_sigma_next = torch.tensor([tv_next / self.architecture.video_scheduler.num_train_timesteps], device=device, dtype=dtype)
+            for step, ((tv, ta), (tv_next, ta_next)) in enumerate(
+                zip(schedule[:-1], schedule[1:])
+            ):
+                sigma = torch.tensor(
+                    [ta / self.architecture.action_scheduler.num_train_timesteps],
+                    device=device,
+                    dtype=dtype,
+                )
+                sigma_next = torch.tensor(
+                    [ta_next / self.architecture.action_scheduler.num_train_timesteps],
+                    device=device,
+                    dtype=dtype,
+                )
+                video_sigma = torch.tensor(
+                    [tv / self.architecture.video_scheduler.num_train_timesteps],
+                    device=device,
+                    dtype=dtype,
+                )
+                video_sigma_next = torch.tensor(
+                    [tv_next / self.architecture.video_scheduler.num_train_timesteps],
+                    device=device,
+                    dtype=dtype,
+                )
                 native_pipeline = dict(native)
                 proprio_native = native_pipeline.pop("proprio", None)
-                vp, ap = self.architecture.forward(action, torch.tensor([ta], device=device, dtype=dtype),
-                                                   proprio=proprio_native, **native_pipeline,
-                                                   timestep=torch.tensor([tv], device=device, dtype=dtype))
+                vp, ap = self.architecture.forward(
+                    action,
+                    torch.tensor([ta], device=device, dtype=dtype),
+                    proprio=proprio_native,
+                    **native_pipeline,
+                    timestep=torch.tensor([tv], device=device, dtype=dtype),
+                )
                 if step == chosen:
                     selected_video = native["latents"].detach().clone()
-                video = video + vp * (video_sigma_next - video_sigma)
+                video = _restore_clean_prefix(
+                    video + vp * (video_sigma_next - video_sigma),
+                    native.get("first_frame_latents"),
+                )
                 native["latents"] = video
                 mean = action + ap * (sigma_next - sigma).view(1, 1, 1)
-                noise_std = torch.sqrt((sigma - sigma_next).clamp_min(1e-6)) * self.noise_std
+                noise_std = (
+                    torch.sqrt((sigma - sigma_next).clamp_min(1e-6)) * self.noise_std
+                )
                 if step == chosen:
-                    selected_sigma, selected_next, selected_std = sigma.detach(), sigma_next.detach(), noise_std.detach()
-                    selected_action_timestep = torch.tensor([ta], device=device, dtype=torch.float32)
-                    selected_video_timestep = torch.tensor([tv], device=device, dtype=torch.float32)
+                    selected_sigma, selected_next, selected_std = (
+                        sigma.detach(),
+                        sigma_next.detach(),
+                        noise_std.detach(),
+                    )
+                    selected_action_timestep = torch.tensor(
+                        [ta], device=device, dtype=torch.float32
+                    )
+                    selected_video_timestep = torch.tensor(
+                        [tv], device=device, dtype=torch.float32
+                    )
                     action = mean + torch.randn_like(action) * noise_std
                 else:
                     action = mean
                 chains.append(action)
-            flat = {"chains": torch.stack(chains, dim=1).squeeze(0).contiguous(),
-                    "denoise_inds": torch.full((steps,), chosen, device=device, dtype=torch.long),
-                    "video_latents": selected_video.squeeze(0).contiguous(), "sigma": selected_sigma,
-                    "sigma_next": selected_next, "noise_std": selected_std,
-                    "video_timesteps": selected_video_timestep, "action_timesteps": selected_action_timestep,
-                    "active_action_indices": torch.as_tensor(getattr(getattr(self.architecture, "normalizer", None), "_dst_index", list(range(action_dim))), device=device, dtype=torch.long),
-                    "model_action": action.squeeze(0).reshape(-1).float()}
+            flat = {
+                "chains": torch.stack(chains, dim=1).squeeze(0).contiguous(),
+                "denoise_inds": torch.full(
+                    (steps,), chosen, device=device, dtype=torch.long
+                ),
+                "video_latents": selected_video.squeeze(0).contiguous(),
+                "sigma": selected_sigma,
+                "sigma_next": selected_next,
+                "noise_std": selected_std,
+                "video_timesteps": selected_video_timestep,
+                "action_timesteps": selected_action_timestep,
+                "active_action_indices": torch.as_tensor(
+                    getattr(
+                        getattr(self.architecture, "normalizer", None),
+                        "_dst_index",
+                        list(range(action_dim)),
+                    ),
+                    device=device,
+                    dtype=torch.long,
+                ),
+                "model_action": action.squeeze(0).reshape(-1).float(),
+            }
             physical = action.squeeze(0).float().cpu().numpy()
             normalizer = getattr(self.architecture, "normalizer", None)
             if normalizer is not None:
                 physical = normalizer.unnormalize(physical)
-            flat["action"] = torch.as_tensor(physical, device=device).reshape(-1).float()
-            for key, value in native.items():
-                if key == "proprio" and isinstance(value, torch.Tensor) and value.ndim == 1:
-                    value = value.unsqueeze(0)
-                if _has_batch_dim_one(value):
-                    flat[f"native__{key}"] = _contiguous_tree(value)
+            flat["action"] = (
+                torch.as_tensor(physical, device=device).reshape(-1).float()
+            )
+            flat.update(
+                pack_native_inputs(native, text_capacity=self.replay_text_capacity)
+            )
             records.append(flat)
-            outputs.append(torch.as_tensor(physical, device=device, dtype=torch.float32))
+            outputs.append(
+                torch.as_tensor(physical, device=device, dtype=torch.float32)
+            )
         forward_inputs = _stack_flat_records(records)
         # Rollout sampling is performed one observation at a time.  Keep the
         # behavior policy score in that same batch shape: the Wan attention
@@ -334,13 +572,16 @@ class OpenWAMPolicy(nn.Module, BasePolicy):
             record_inputs = {
                 key: value[index : index + 1] for key, value in forward_inputs.items()
             }
-            per_record_scores.append(self.rl_forward(record_inputs, compute_values=True))
+            per_record_scores.append(
+                self.rl_forward(record_inputs, compute_values=True)
+            )
         return torch.stack(outputs), {
             "prev_logprobs": torch.cat(
                 [score["logprobs"].detach() for score in per_record_scores], dim=0
             ),
             "prev_values": torch.cat(
-                [score["values"].detach().unsqueeze(-1) for score in per_record_scores], dim=0
+                [score["values"].detach().unsqueeze(-1) for score in per_record_scores],
+                dim=0,
             ),
             "forward_inputs": forward_inputs,
         }
@@ -359,14 +600,22 @@ def _checkpoint_with_encoder_override(
     """
     checkpoint_dir = Path(model_path).expanduser().resolve()
     if not checkpoint_dir.is_dir():
-        raise FileNotFoundError(f"OpenWAM checkpoint directory not found: {checkpoint_dir}")
+        raise FileNotFoundError(
+            f"OpenWAM checkpoint directory not found: {checkpoint_dir}"
+        )
 
     from omegaconf import OmegaConf
 
     cfg = OmegaConf.load(checkpoint_dir / "config.yaml")
     encoder_cfg = OmegaConf.select(cfg, "model.video_backbone.encoder", default=None)
-    encoder_name = str(getattr(encoder_cfg, "name", "")) if encoder_cfg is not None else ""
-    name_aliases = {"vjepa2_1": "vjepa21", "flux_vae": "flux2_vae", "wan_vae": "wan22_vae"}
+    encoder_name = (
+        str(getattr(encoder_cfg, "name", "")) if encoder_cfg is not None else ""
+    )
+    name_aliases = {
+        "vjepa2_1": "vjepa21",
+        "flux_vae": "flux2_vae",
+        "wan_vae": "wan22_vae",
+    }
     canonical_name = name_aliases.get(encoder_name, encoder_name)
     needs_staging = encoder_model_path is not None or canonical_name != encoder_name
     if not needs_staging:
@@ -380,7 +629,9 @@ def _checkpoint_with_encoder_override(
     if encoder_model_path is not None:
         encoder_dir = Path(encoder_model_path).expanduser().resolve()
         if not encoder_dir.is_dir():
-            raise FileNotFoundError(f"OpenWAM encoder_model_path is not a directory: {encoder_dir}")
+            raise FileNotFoundError(
+                f"OpenWAM encoder_model_path is not a directory: {encoder_dir}"
+            )
         encoder_cfg.model_path = str(encoder_dir)
     if canonical_name != encoder_name:
         encoder_cfg.name = canonical_name
@@ -390,7 +641,9 @@ def _checkpoint_with_encoder_override(
         staged.mkdir()
         for entry in checkpoint_dir.iterdir():
             if entry.name != "config.yaml":
-                os.symlink(entry, staged / entry.name, target_is_directory=entry.is_dir())
+                os.symlink(
+                    entry, staged / entry.name, target_is_directory=entry.is_dir()
+                )
         OmegaConf.save(cfg, staged / "config.yaml")
         yield str(staged)
 
@@ -406,7 +659,9 @@ def _infer_batch_size(obs: dict[str, Any]) -> int:
     return 1
 
 
-def _batch_value(obs: dict[str, Any], keys: tuple[str, ...], index: int, default: Any = None) -> Any:
+def _batch_value(
+    obs: dict[str, Any], keys: tuple[str, ...], index: int, default: Any = None
+) -> Any:
     value = next((obs[key] for key in keys if key in obs), default)
     if isinstance(value, (torch.Tensor, np.ndarray)) and value.ndim > 1:
         return value[index]
@@ -426,7 +681,9 @@ def _to_pil(value: Any) -> Image.Image:
     if array.ndim == 4:
         array = array[0]
     if array.dtype != np.uint8:
-        array = np.clip(array * 255 if array.max() <= 1.0 else array, 0, 255).astype(np.uint8)
+        array = np.clip(array * 255 if array.max() <= 1.0 else array, 0, 255).astype(
+            np.uint8
+        )
     return Image.fromarray(array)
 
 
@@ -434,7 +691,9 @@ def _axis_angle_to_rotation_6d(value: Any) -> np.ndarray:
     """Convert a LIBERO axis-angle state to OpenWAM's 6-D representation."""
     from scipy.spatial.transform import Rotation
 
-    matrix = Rotation.from_rotvec(np.asarray(value, dtype=np.float64).reshape(3)).as_matrix()
+    matrix = Rotation.from_rotvec(
+        np.asarray(value, dtype=np.float64).reshape(3)
+    ).as_matrix()
     return np.concatenate([matrix[:, 0], matrix[:, 1]]).astype(np.float32)
 
 
@@ -482,65 +741,44 @@ def _compose_observation_image(
     )
 
 
-def _move_tree(value: Any, *, device: torch.device) -> Any:
-    """Move nested native/VLM conditioning without changing token dtypes."""
-    if isinstance(value, torch.Tensor):
-        return value.to(device=device)
-    if isinstance(value, Mapping):
-        return {key: _move_tree(item, device=device) for key, item in value.items()}
-    if isinstance(value, tuple):
-        return tuple(_move_tree(item, device=device) for item in value)
-    if isinstance(value, list):
-        return [_move_tree(item, device=device) for item in value]
-    return value
+def _observation_proprio(env_obs: dict[str, Any], index: int) -> np.ndarray | None:
+    """Use explicit native physical units, or convert LIBERO's achieved pose."""
+    value = _batch_value(env_obs, ("native_proprio",), index, None)
+    if value is not None:
+        if isinstance(value, torch.Tensor):
+            value = value.detach().cpu().numpy()
+        value = np.asarray(value, dtype=np.float32)
+        if value.ndim != 1 or not np.isfinite(value).all():
+            raise ValueError(
+                "native_proprio must be a finite vector in checkpoint physical units"
+            )
+        return value
+    return _libero_state_to_eef10(
+        _batch_value(env_obs, ("states", "state", "proprio"), index, None)
+    )
 
 
-def _has_batch_dim_one(value: Any) -> bool:
-    if isinstance(value, torch.Tensor):
-        return value.ndim > 0 and value.shape[0] == 1
-    if isinstance(value, Mapping):
-        return bool(value) and all(_has_batch_dim_one(item) for item in value.values())
-    return False
+def _restore_clean_prefix(
+    video: torch.Tensor, reference: torch.Tensor | None
+) -> torch.Tensor:
+    if reference is not None:
+        video = video.clone()
+        video[:, :, : reference.shape[2]] = reference
+    return video
 
 
-def _contiguous_tree(value: Any) -> Any:
-    if isinstance(value, torch.Tensor):
-        return value.contiguous()
-    if isinstance(value, Mapping):
-        return {key: _contiguous_tree(item) for key, item in value.items()}
-    if isinstance(value, tuple):
-        return tuple(_contiguous_tree(item) for item in value)
-    if isinstance(value, list):
-        return [_contiguous_tree(item) for item in value]
-    return value
-
-
-def _stack_tree(values: list[Any], *, cat_batch: bool = False) -> Any:
-    first = values[0]
-    if isinstance(first, torch.Tensor):
-        if cat_batch and first.ndim > 0 and first.shape[0] == 1:
-            return torch.cat(values, dim=0).contiguous()
-        return torch.stack(values, dim=0).contiguous()
-    if isinstance(first, Mapping):
-        keys = set(first)
-        if any(set(value) != keys for value in values[1:]):
-            raise ValueError("OpenWAM nested rollout records have inconsistent keys")
-        return {key: _stack_tree([value[key] for value in values], cat_batch=cat_batch) for key in keys}
-    raise TypeError(f"Unsupported OpenWAM rollout value type: {type(first)!r}")
-
-
-def _stack_flat_records(records: list[dict[str, Any]]) -> dict[str, Any]:
-    """Stack per-observation tensors and nested VLM conditioning."""
+def _stack_flat_records(
+    records: list[dict[str, torch.Tensor]],
+) -> dict[str, torch.Tensor]:
+    """Stack the flat, fixed-shape tensors consumed by RLinf trajectories."""
     if not records:
         raise ValueError("OpenWAM RL sampler produced no records")
     keys = set(records[0])
     if any(set(record) != keys for record in records[1:]):
-        raise ValueError("OpenWAM RL records have inconsistent native conditioning keys")
-    return {
-        key: _stack_tree(
-            [record[key] for record in records],
-            cat_batch=key.startswith("native__"),
+        raise ValueError(
+            "OpenWAM RL records have inconsistent native conditioning keys"
         )
+    return {
+        key: torch.stack([record[key] for record in records], dim=0).contiguous()
         for key in keys
     }
-
