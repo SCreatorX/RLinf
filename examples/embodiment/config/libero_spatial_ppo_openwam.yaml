@@ -71,13 +71,13 @@ env:
   # Override the default values in env/libero_spatial
   train:
     rollout_epoch: 8
-    openwam_action_representation: absolute_eef10
+    openwam_action_representation: native_delta_eef10
     total_num_envs: 64
     max_episode_steps: 320 # max episode steps for truncation
     max_steps_per_rollout_epoch: 320
   eval:
     rollout_epoch: 1
-    openwam_action_representation: absolute_eef10
+    openwam_action_representation: native_delta_eef10
     total_num_envs: 500
     auto_reset: True
     ignore_terminations: True
@@ -100,7 +100,7 @@ rollout:
 
   model:
     model_type: "openwam"
-    model_path: "/mnt/data/wangyuran/openwam_checkpoints/openwam-libero-sft-30000"
+    model_path: "/mnt/data/wangyuran/openwam_checkpoints/new-openwam-libero-sft-10epoch-delta-aligned"
     precision: bf16
     device: cuda
     is_lora: false
@@ -108,6 +108,9 @@ rollout:
     num_frames: 33
     denoise_steps: 4
     action_dim: 10
+    num_action_chunks: 10 # executed per generation (openwam.inference_horizon)
+    openwam:
+      inference_horizon: 10
 
 actor:
   group_name: "ActorGroup"
@@ -120,7 +123,7 @@ actor:
 
   model:
     model_type: "openwam"
-    model_path: "/mnt/data/wangyuran/openwam_checkpoints/openwam-libero-sft-30000"
+    model_path: "/mnt/data/wangyuran/openwam_checkpoints/new-openwam-libero-sft-10epoch-delta-aligned"
     precision: bf16
     device: cuda
     is_lora: false
@@ -128,11 +131,12 @@ actor:
     num_frames: 33
     denoise_steps: 4
     action_dim: 10
-    num_action_chunks: 32 # generated actions = num_frames - 1
+    num_action_chunks: 10 # executed per generation; the model still predicts num_frames - 1 = 32
     add_value_head: True
     openwam:
       rl_enabled: true
       noise_std: 0.05
+      inference_horizon: 10 # execute 10 of the 32 predicted actions, then regenerate
 
   optim:
     lr: 5.0e-6

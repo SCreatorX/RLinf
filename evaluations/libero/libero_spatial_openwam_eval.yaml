@@ -40,16 +40,16 @@ env:
     total_num_envs: 2
     auto_reset: true
     ignore_terminations: true
-    max_episode_steps: 320
-    max_steps_per_rollout_epoch: 320
+    max_episode_steps: 600
+    max_steps_per_rollout_epoch: 600
     group_size: 1
     use_fixed_reset_state_ids: true
     use_ordered_reset_state_ids: true
     is_eval: true
     # Only the final frame of each action chunk is consumed by eval; disabling
     # intermediate EGL renders keeps multi-process LIBERO stable.
-    skip_intermediate_renders: true
-    openwam_action_representation: absolute_eef10
+    skip_intermediate_renders: false
+    openwam_action_representation: native_delta_eef10
     video_cfg:
       save_video: false
       video_base_dir: ${runner.logger.log_path}/video/eval
@@ -63,13 +63,15 @@ rollout:
     model_type: "openwam"
     precision: bf16
     is_lora: false
-    model_path: /mnt/data/wangyuran/openwam_checkpoints/openwam-libero-sft-30000
+    model_path: /mnt/data/wangyuran/openwam_checkpoints/new-openwam-libero-sft-10epoch-delta-aligned
     device: cuda
     load_to_device: false
     ckpt_name: null
     num_frames: 33
-    num_action_chunks: 32
+    num_action_chunks: 10 # executed per generation, see openwam.inference_horizon
     action_dim: 10
     height: 384
     width: 320
     denoise_steps: 10
+    openwam:
+      inference_horizon: 10 # OpenWAM's deploy executor regenerates after 10 of 32 actions

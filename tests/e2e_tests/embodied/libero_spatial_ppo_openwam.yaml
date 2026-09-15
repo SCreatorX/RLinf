@@ -28,8 +28,8 @@ env:
   train:
     rollout_epoch: 1
     total_num_envs: 2
-    max_episode_steps: 64
-    max_steps_per_rollout_epoch: 64
+    max_episode_steps: 60
+    max_steps_per_rollout_epoch: 60
     video_cfg:
       save_video: false
 
@@ -39,7 +39,7 @@ rollout:
 
 actor:
   micro_batch_size: 1
-  # One optimizer step per rollout: 2 envs x (64 / 32 action chunks).
-  global_batch_size: 4
+  # One optimizer step per rollout: 2 envs x (60 / 10 executed actions).
+  global_batch_size: 12
   model:
     denoise_steps: 2

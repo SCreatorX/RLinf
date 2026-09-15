@@ -20,4 +20,4 @@ env:
 actor:
   micro_batch_size: 1
   # 8 envs * 1 epoch * 10 chunks = 80 samples; five optimizer updates.
-  global_batch_size: 16
+  global_batch_size: 256 # one optimizer step per rollout: 8 envs x (320 / 10 executed actions)
