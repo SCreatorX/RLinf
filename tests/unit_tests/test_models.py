@@ -135,7 +135,7 @@ def test_openwam_ppo_recipes_validate(openwam_recipe, name):
     [
         (
             ["actor.global_batch_size=2048", "actor.micro_batch_size=128"],
-            r"5120 action-chunk samples.*global_batch_size \(2048\)",
+            r"16384 action-chunk samples.*global_batch_size \(2048\)",
         ),
         (["actor.global_batch_size=0"], "batch sizes must be positive"),
         (["actor.micro_batch_size=0"], "batch sizes must be positive"),
