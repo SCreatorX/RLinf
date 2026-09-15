@@ -42,6 +42,7 @@ def get_model(cfg: DictConfig, torch_dtype: torch.dtype | None = None) -> OpenWA
         replay_text_capacity=int(
             (cfg.get("openwam", {}) or {}).get("replay_text_capacity", 512)
         ),
+        inference_horizon=(cfg.get("openwam", {}) or {}).get("inference_horizon"),
         encoder_model_path=(
             str(cfg.get("encoder_model_path"))
             if cfg.get("encoder_model_path") is not None

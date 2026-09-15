@@ -369,6 +369,46 @@ def test_openwam_architecture_rollout_replay_and_backward(monkeypatch, tri_syste
             policy.predict_action_batch(obs, mode="train")
 
 
+def test_openwam_eval_inference_horizon_truncates_chunks():
+    """Eval executes the first ``inference_horizon`` actions of a 32-step chunk."""
+
+    class _Engine:
+        architecture = SimpleNamespace(action_dim=10)
+
+        def generate(self, condition):
+            return {"actions": np.tile(np.arange(32, dtype=np.float32)[:, None], 10)}
+
+    obs = {
+        "images": np.zeros((2, 8, 8, 3), dtype=np.uint8),
+        "task_descriptions": ["a", "b"],
+    }
+    full = OpenWAMPolicy(_Engine(), num_frames=33, height=8, width=8, denoise_steps=2)
+    actions, _ = full.predict_action_batch(obs, mode="eval")
+    assert actions.shape == (2, 32, 10)
+
+    policy = OpenWAMPolicy(
+        _Engine(),
+        num_frames=33,
+        height=8,
+        width=8,
+        denoise_steps=2,
+        inference_horizon=10,
+    )
+    actions, _ = policy.predict_action_batch(obs, mode="eval")
+    assert actions.shape == (2, 10, 10)
+    assert torch.equal(actions[0, :, 0], torch.arange(10, dtype=torch.float32))
+
+    with pytest.raises(ValueError, match="inference_horizon"):
+        OpenWAMPolicy(
+            _Engine(),
+            num_frames=33,
+            height=8,
+            width=8,
+            denoise_steps=2,
+            inference_horizon=33,
+        )
+
+
 def test_openwam_sft_forward_delegates_native_loss():
     class _Architecture(torch.nn.Module):
         def __init__(self):

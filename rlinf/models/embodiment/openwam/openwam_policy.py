@@ -49,6 +49,7 @@ class OpenWAMPolicy(nn.Module, BasePolicy):
         lambda_action: float = 1.0,
         noise_std: float = 0.05,
         replay_text_capacity: int = 512,
+        inference_horizon: int | None = None,
     ):
         super().__init__()
         self.engine = engine
@@ -64,6 +65,18 @@ class OpenWAMPolicy(nn.Module, BasePolicy):
         self.replay_text_capacity = int(replay_text_capacity)
         if self.replay_text_capacity <= 0:
             raise ValueError("OpenWAM replay_text_capacity must be positive")
+        # Receding-horizon eval: execute only the first ``inference_horizon``
+        # actions of each generated chunk, as OpenWAM's deploy executor does.
+        self.inference_horizon = (
+            None if inference_horizon is None else int(inference_horizon)
+        )
+        if self.inference_horizon is not None and not (
+            0 < self.inference_horizon <= max(1, num_frames - 1)
+        ):
+            raise ValueError(
+                "OpenWAM inference_horizon must be in [1, num_frames - 1], got "
+                f"{inference_horizon} for num_frames={num_frames}"
+            )
         self.architecture = engine.architecture
         engine_cfg = getattr(engine, "cfg", None)
         dataloader_cfg = getattr(engine_cfg, "dataloader", None)
@@ -94,6 +107,7 @@ class OpenWAMPolicy(nn.Module, BasePolicy):
         encoder_model_path: str | None = None,
         noise_std: float = 0.05,
         replay_text_capacity: int = 512,
+        inference_horizon: int | None = None,
     ) -> "OpenWAMPolicy":
         """Build OpenWAM's checkpoint loader and joint inference engine."""
         from omegaconf import OmegaConf
@@ -148,6 +162,7 @@ class OpenWAMPolicy(nn.Module, BasePolicy):
             lambda_action=lambda_action,
             noise_std=noise_std,
             replay_text_capacity=replay_text_capacity,
+            inference_horizon=inference_horizon,
         )
         model.to(
             device=device, dtype=torch_dtype or next(architecture.parameters()).dtype
@@ -355,9 +370,10 @@ class OpenWAMPolicy(nn.Module, BasePolicy):
             result = self.engine.generate(condition)
             actions.append(np.asarray(result["actions"]))
             results.append(result)
-        return torch.as_tensor(np.stack(actions), dtype=torch.float32), {
-            "results": results
-        }
+        stacked = torch.as_tensor(np.stack(actions), dtype=torch.float32)
+        if self.inference_horizon is not None:
+            stacked = stacked[:, : self.inference_horizon]
+        return stacked, {"results": results}
 
     @torch.no_grad()
     def _predict_rl_batch(self, env_obs):
