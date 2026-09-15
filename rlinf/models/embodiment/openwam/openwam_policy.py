@@ -18,6 +18,7 @@ from __future__ import annotations
 
 import os
 import tempfile
+from collections.abc import Mapping
 from contextlib import contextmanager
 from pathlib import Path
 from typing import Any, Iterator
@@ -221,11 +222,16 @@ class OpenWAMPolicy(nn.Module, BasePolicy):
     @torch.no_grad()
     def _predict_rl_batch(self, env_obs):
         """Collect a native joint-flow chain for PPO."""
-        if self.architecture.__class__.__name__ != "DualSystemSelfAttnArchitecture":
-            raise NotImplementedError(
-                "OpenWAM PPO rollout currently supports only the validated "
-                "dual_system_self_attn (Wan22) architecture."
-            )
+        # OpenWAM architecture variants share the joint-flow forward contract.
+        # Tri-system additionally consumes VLM inputs; those are prepared below
+        # and kept in the replay record. Fail early for future architectures
+        # that do not expose the scheduler/backbone interface required here.
+        for name in ("video_backbone", "action_scheduler", "video_scheduler"):
+            if not hasattr(self.architecture, name):
+                raise NotImplementedError(
+                    f"OpenWAM PPO requires architecture.{name}; "
+                    f"unsupported architecture {self.architecture.__class__.__name__}."
+                )
         batch_size = _infer_batch_size(env_obs)
         records, outputs = [], []
         steps = max(2, self.denoise_steps)
@@ -246,7 +252,21 @@ class OpenWAMPolicy(nn.Module, BasePolicy):
                 first_frame_image=[image], num_frames=self.num_frames, height=self.height, width=self.width,
                 seed=42, num_inference_steps=steps, shift=float(video_shift), tiled=True,
                 cfg_scale=1.0, cfg_merge=False)
-            native = {k: v.to(device=device, dtype=dtype) if isinstance(v, torch.Tensor) else v for k, v in native.items()}
+            native = _move_tree(native, device=device)
+            # Tri-system MoT requires one VLM context per observation. Preserve
+            # token ids and processor-specific dtypes while moving tensors.
+            vlm_backbone = getattr(self.architecture, "vlm_backbone", None)
+            if vlm_backbone is not None:
+                prompt = _batch_value(
+                    env_obs,
+                    ("task_descriptions", "task_description", "language"),
+                    index,
+                    "",
+                )
+                native["vlm_inputs"] = _move_tree(
+                    vlm_backbone.prepare_vlm_inputs([prompt], [image]),
+                    device=device,
+                )
             if getattr(self.architecture, "uses_proprioception", False):
                 native["proprio"] = self.architecture.normalize_deploy_proprio(proprio).to(device=device, dtype=dtype)
             video = native["latents"]
@@ -296,12 +316,10 @@ class OpenWAMPolicy(nn.Module, BasePolicy):
                 physical = normalizer.unnormalize(physical)
             flat["action"] = torch.as_tensor(physical, device=device).reshape(-1).float()
             for key, value in native.items():
-                if not isinstance(value, torch.Tensor):
-                    continue
-                if key == "proprio" and value.ndim == 1:
+                if key == "proprio" and isinstance(value, torch.Tensor) and value.ndim == 1:
                     value = value.unsqueeze(0)
-                if value.ndim > 0 and value.shape[0] == 1:
-                    flat[f"native__{key}"] = value.contiguous()
+                if _has_batch_dim_one(value):
+                    flat[f"native__{key}"] = _contiguous_tree(value)
             records.append(flat)
             outputs.append(torch.as_tensor(physical, device=device, dtype=torch.float32))
         forward_inputs = _stack_flat_records(records)
@@ -464,35 +482,65 @@ def _compose_observation_image(
     )
 
 
-def _stack_flat_records(records: list[dict[str, torch.Tensor]]) -> dict[str, torch.Tensor]:
-    """Stack per-observation tensors while preserving the rollout flat contract."""
+def _move_tree(value: Any, *, device: torch.device) -> Any:
+    """Move nested native/VLM conditioning without changing token dtypes."""
+    if isinstance(value, torch.Tensor):
+        return value.to(device=device)
+    if isinstance(value, Mapping):
+        return {key: _move_tree(item, device=device) for key, item in value.items()}
+    if isinstance(value, tuple):
+        return tuple(_move_tree(item, device=device) for item in value)
+    if isinstance(value, list):
+        return [_move_tree(item, device=device) for item in value]
+    return value
+
+
+def _has_batch_dim_one(value: Any) -> bool:
+    if isinstance(value, torch.Tensor):
+        return value.ndim > 0 and value.shape[0] == 1
+    if isinstance(value, Mapping):
+        return bool(value) and all(_has_batch_dim_one(item) for item in value.values())
+    return False
+
+
+def _contiguous_tree(value: Any) -> Any:
+    if isinstance(value, torch.Tensor):
+        return value.contiguous()
+    if isinstance(value, Mapping):
+        return {key: _contiguous_tree(item) for key, item in value.items()}
+    if isinstance(value, tuple):
+        return tuple(_contiguous_tree(item) for item in value)
+    if isinstance(value, list):
+        return [_contiguous_tree(item) for item in value]
+    return value
+
+
+def _stack_tree(values: list[Any], *, cat_batch: bool = False) -> Any:
+    first = values[0]
+    if isinstance(first, torch.Tensor):
+        if cat_batch and first.ndim > 0 and first.shape[0] == 1:
+            return torch.cat(values, dim=0).contiguous()
+        return torch.stack(values, dim=0).contiguous()
+    if isinstance(first, Mapping):
+        keys = set(first)
+        if any(set(value) != keys for value in values[1:]):
+            raise ValueError("OpenWAM nested rollout records have inconsistent keys")
+        return {key: _stack_tree([value[key] for value in values], cat_batch=cat_batch) for key in keys}
+    raise TypeError(f"Unsupported OpenWAM rollout value type: {type(first)!r}")
+
+
+def _stack_flat_records(records: list[dict[str, Any]]) -> dict[str, Any]:
+    """Stack per-observation tensors and nested VLM conditioning."""
     if not records:
         raise ValueError("OpenWAM RL sampler produced no records")
     keys = set(records[0])
     if any(set(record) != keys for record in records[1:]):
         raise ValueError("OpenWAM RL records have inconsistent native conditioning keys")
-    result = {}
-    for key in keys:
-        values = [record[key] for record in records]
-        if key.startswith("native__") and values[0].ndim > 0 and values[0].shape[0] == 1:
-            result[key] = torch.cat(values, dim=0).contiguous()
-        else:
-            result[key] = torch.stack(values, dim=0).contiguous()
-    return result
+    return {
+        key: _stack_tree(
+            [record[key] for record in records],
+            cat_batch=key.startswith("native__"),
+        )
+        for key in keys
+    }
 
-
-def _stack_flat_records(records: list[dict[str, torch.Tensor]]) -> dict[str, torch.Tensor]:
-    """Stack per-observation tensors while preserving the rollout contract."""
-    if not records:
-        raise ValueError("OpenWAM RL sampler produced no records")
-    keys = set(records[0])
-    if any(set(record) != keys for record in records[1:]):
-        raise ValueError("OpenWAM RL records have inconsistent native conditioning keys")
-    result = {}
-    for key in keys:
-        values = [record[key] for record in records]
-        if key.startswith("native__") and values[0].ndim > 0 and values[0].shape[0] == 1:
-            result[key] = torch.cat(values, dim=0).contiguous()
-        else:
-            result[key] = torch.stack(values, dim=0).contiguous()
-    return result

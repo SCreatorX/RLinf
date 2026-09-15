@@ -47,6 +47,7 @@ from rlinf.models.embodiment.openwam.openwam_policy import (
     _checkpoint_with_encoder_override,
     _infer_batch_size,
     _libero_state_to_eef10,
+    _stack_flat_records,
     _to_pil,
 )
 from rlinf.utils.env_helpers import HistoryManager
@@ -211,6 +212,26 @@ def test_openwam_encoder_path_override_stages_checkpoint(tmp_path):
         assert (staged / "normalization_stats.npy").is_symlink()
 
     assert not Path(staged_path).exists()
+
+def test_openwam_nested_vlm_rollout_records_stack_batch():
+    records = []
+    for index in range(2):
+        records.append(
+            {
+                "native__vlm_inputs": {
+                    "input_ids": torch.tensor([[index + 1, index + 2]], dtype=torch.long),
+                    "pixel_values": torch.full((1, 2, 2), float(index)),
+                },
+                "native__latents": torch.full((1, 3), float(index)),
+            }
+        )
+
+    stacked = _stack_flat_records(records)
+    assert stacked["native__vlm_inputs"]["input_ids"].shape == (2, 2)
+    assert stacked["native__vlm_inputs"]["input_ids"].dtype == torch.long
+    assert stacked["native__vlm_inputs"]["pixel_values"].shape == (2, 2, 2)
+    assert stacked["native__latents"].shape == (2, 3)
+
 
 def test_openwam_sft_forward_delegates_native_loss():
     class _Architecture(torch.nn.Module):
