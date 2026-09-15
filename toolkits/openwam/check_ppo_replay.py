@@ -77,6 +77,12 @@ try:
     res["arch"] = arch.__class__.__name__
     res["video_backbone"] = arch.video_backbone.__class__.__name__
     res["proprio_dim"] = int(getattr(arch, "proprio_dim", 0))
+    # Checkpoints trained with dataloader.unify_action scatter a physical state
+    # (e.g. 20-D) into a wider unified vector (e.g. 80-D); feed the physical width.
+    normalizer = getattr(arch, "normalizer", None)
+    state_index = getattr(normalizer, "_state_dst_index", None)
+    physical_dim = len(state_index) if state_index is not None else res["proprio_dim"]
+    res["physical_state_dim"] = int(physical_dim)
     if args.no_normalizer:
         res["normalizer_bypassed"] = True
         arch.normalizer = None
@@ -94,7 +100,7 @@ try:
     rng = np.random.default_rng(0)
     obs = {
         "images": rng.integers(0, 255, size=(2, 384, 320, 3), dtype=np.uint8),
-        "native_proprio": np.zeros((2, res["proprio_dim"] or 20), dtype=np.float32),
+        "native_proprio": np.zeros((2, physical_dim or 20), dtype=np.float32),
         "task_descriptions": [
             "pick up the bottle",
             "place the red block into the box on the left side of the table",

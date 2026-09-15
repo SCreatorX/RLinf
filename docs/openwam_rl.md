@@ -17,7 +17,7 @@ The PPO bridge dispatches on the checkpoint's architecture, so every OpenWAM arc
 | single_system `vanilla`, `moe` | validated at model level |
 | tri_system `joint_self_attn` (Qwen3-VL) | validated at model level; the frozen VLM is run once per observation and its hidden states are replayed |
 | Wan2.1 VACE 1.3B, Wan2.1 I2V 14B | validated at model level (a single 14B replay sample peaks at about 117 GB on one GPU; use FSDP across actor ranks) |
-| Cosmos3 Edge | replay path validated; the study checkpoint's `state_dim: 80` does not match its 20-D `normalization_stats.npy`, so it cannot be used with a normalizer as shipped |
+| Cosmos3 Edge | validated at model level (trained with `unify_action`: the 20-D physical state is scattered into an 80-D unified vector by the checkpoint's normalizer) |
 | Cosmos-Predict2.5 | untested: requires OpenWAM's `install_cosmos_predict25.sh` extras |
 
 `toolkits/openwam/check_ppo_replay.py` runs this check for one checkpoint and writes the metrics as JSON; use it before enabling PPO on a checkpoint family that is not listed above.
@@ -30,7 +30,7 @@ RLinf carries rollout `forward_inputs` as flat tensors: they are split per envir
 
 ### Proprioception
 
-LIBERO observations expose `states`; the bridge converts them to OpenWAM's 10-D absolute EEF representation. An environment can instead provide `native_proprio` (a finite vector already in the checkpoint's physical units, e.g. the 20-D Robotwin state); it is normalized with the checkpoint's `normalization_stats.npy` and bypasses the LIBERO conversion.
+LIBERO observations expose `states`; the bridge converts them to OpenWAM's 10-D absolute EEF representation. An environment can instead provide `native_proprio` (a finite vector in the checkpoint's physical state units, e.g. the 20-D Robotwin state); it is normalized with the checkpoint's `normalization_stats.npy` and bypasses the LIBERO conversion. Checkpoints trained with `dataloader.unify_action` report `proprio_dim`/`action_dim` of the unified width (80); the physical width is the normalizer's, and `active_action_indices` selects the physical action dims for the PPO log-probability.
 
 ## Exporting a PPO checkpoint for OpenWAM eval
 
