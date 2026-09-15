@@ -122,9 +122,11 @@ class OpenWAMPolicy(nn.Module, BasePolicy):
         native = {k[len("native__"):]: v for k, v in forward_inputs.items() if k.startswith("native__")}
         native["latents"] = forward_inputs["video_latents"]
         proprio = native.pop("proprio", None)
-        _, a_pred = self.architecture.forward(action_t, forward_inputs["action_timesteps"].view(-1),
+        action_timestep = forward_inputs["action_timesteps"].view(-1).to(action_t.dtype)
+        video_timestep = forward_inputs["video_timesteps"].view(-1).to(action_t.dtype)
+        _, a_pred = self.architecture.forward(action_t, action_timestep,
                                                proprio=proprio, **native,
-                                               timestep=forward_inputs["video_timesteps"].view(-1))
+                                               timestep=video_timestep)
         sigma, sigma_next = forward_inputs["sigma"].view(-1), forward_inputs["sigma_next"].view(-1)
         mean = action_t + a_pred * (sigma_next - sigma).view(-1, 1, 1)
         std = forward_inputs["noise_std"].view(-1, 1, 1).clamp_min(1e-6)
@@ -256,6 +258,7 @@ class OpenWAMPolicy(nn.Module, BasePolicy):
             chosen = int(torch.randint(0, len(schedule) - 1, ()).item())
             chains = [action]
             selected_video = selected_sigma = selected_next = selected_std = None
+            selected_action_timestep = selected_video_timestep = None
             for step, ((tv, ta), (tv_next, ta_next)) in enumerate(zip(schedule[:-1], schedule[1:])):
                 sigma = torch.tensor([ta / self.architecture.action_scheduler.num_train_timesteps], device=device, dtype=dtype)
                 sigma_next = torch.tensor([ta_next / self.architecture.action_scheduler.num_train_timesteps], device=device, dtype=dtype)
@@ -274,6 +277,8 @@ class OpenWAMPolicy(nn.Module, BasePolicy):
                 noise_std = torch.sqrt((sigma - sigma_next).clamp_min(1e-6)) * self.noise_std
                 if step == chosen:
                     selected_sigma, selected_next, selected_std = sigma.detach(), sigma_next.detach(), noise_std.detach()
+                    selected_action_timestep = torch.tensor([ta], device=device, dtype=torch.float32)
+                    selected_video_timestep = torch.tensor([tv], device=device, dtype=torch.float32)
                     action = mean + torch.randn_like(action) * noise_std
                 else:
                     action = mean
@@ -282,7 +287,7 @@ class OpenWAMPolicy(nn.Module, BasePolicy):
                     "denoise_inds": torch.full((steps,), chosen, device=device, dtype=torch.long),
                     "video_latents": selected_video.squeeze(0).contiguous(), "sigma": selected_sigma,
                     "sigma_next": selected_next, "noise_std": selected_std,
-                    "video_timesteps": selected_sigma * 1000.0, "action_timesteps": selected_sigma * 1000.0,
+                    "video_timesteps": selected_video_timestep, "action_timesteps": selected_action_timestep,
                     "active_action_indices": torch.as_tensor(getattr(getattr(self.architecture, "normalizer", None), "_dst_index", list(range(action_dim))), device=device, dtype=torch.long),
                     "model_action": action.squeeze(0).reshape(-1).float()}
             physical = action.squeeze(0).float().cpu().numpy()
