@@ -140,9 +140,12 @@ def openwam_eval_recipe(monkeypatch):
     placement = SimpleNamespace(
         get_world_size=lambda component: {"env": 1, "rollout": 1}.get(component, 1)
     )
-    monkeypatch.setattr(config_module, "Cluster", lambda: object())
+    # validate_cfg instantiates the Ray cluster with keyword arguments.
+    monkeypatch.setattr(config_module, "Cluster", lambda *args, **kwargs: object())
     monkeypatch.setattr(
-        config_module, "HybridComponentPlacement", lambda cfg, cluster: placement
+        config_module,
+        "HybridComponentPlacement",
+        lambda *args, **kwargs: placement,
     )
     # The eval recipes resolve ``env/libero_*`` through ${oc.env:EMBODIED_PATH}.
     monkeypatch.setenv("EMBODIED_PATH", str(repo / "examples/embodiment"))
