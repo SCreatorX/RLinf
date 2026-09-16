@@ -29,7 +29,7 @@ OpenWAM 监督微调
 
       2 张及以上 GPU 与 FSDP
 
-OpenWAM checkpoint 会提供模型和 dataloader 设置。将 ``data.train_data_paths`` 指向数据集根目录；loader 会读取 ``actor.model.model_path`` 下的 ``config.yaml``，并保留原生的帧数、动作和归一化约定。
+OpenWAM checkpoint 会提供模型和 dataloader 设置。将 ``data.train_data_paths`` 指向数据集根目录（也可以是多个根目录的列表，各数据集用同一套 dataloader 设置读取后按样本数比例拼接）；loader 会读取 ``actor.model.model_path`` 下的 ``config.yaml``，并保留原生的帧数、动作和归一化约定。
 
 安装
 ----

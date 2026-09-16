@@ -27,6 +27,7 @@ from unittest.mock import MagicMock
 import numpy as np
 import pytest
 import torch
+import torch.nn as nn
 from omegaconf import OmegaConf
 from safetensors.torch import load_file, save_file
 
@@ -1208,6 +1209,106 @@ def _make_rlinf_checkpoint(tmp_path: Path, extra: dict | None = None) -> Path:
     state.update(extra or {})
     torch.save(state, step_dir / "actor" / "model_state_dict" / "full_weights.pt")
     return step_dir
+
+
+def test_openwam_exported_value_head_reloads(tmp_path):
+    """A PPO run resumed from an export keeps its critic instead of a fresh one."""
+    from rlinf.models.embodiment.openwam.openwam_policy import (
+        EXPORTED_VALUE_HEAD_FILE,
+        load_exported_value_head,
+    )
+
+    def make_head():
+        return nn.Sequential(nn.Linear(8, 128), nn.SiLU(), nn.Linear(128, 1))
+
+    # Nothing next to a plain OpenWAM checkpoint: leave the fresh head alone.
+    fresh = make_head()
+    before = {k: v.clone() for k, v in fresh.state_dict().items()}
+    assert load_exported_value_head(str(tmp_path), fresh) is False
+    assert all(torch.equal(before[k], v) for k, v in fresh.state_dict().items())
+
+    trained = make_head()
+    with torch.no_grad():
+        for param in trained.parameters():
+            param.fill_(0.5)
+    torch.save(
+        {f"value_head.{k}": v for k, v in trained.state_dict().items()},
+        tmp_path / EXPORTED_VALUE_HEAD_FILE,
+    )
+    assert load_exported_value_head(str(tmp_path), fresh) is True
+    assert all(torch.equal(v, torch.full_like(v, 0.5)) for v in fresh.parameters())
+
+    # A head with a different layout is rejected instead of silently skipped.
+    torch.save(
+        {"value_head.0.weight": torch.zeros(1, 8)},
+        tmp_path / EXPORTED_VALUE_HEAD_FILE,
+    )
+    with pytest.raises(ValueError, match="does not match the PPO value head"):
+        load_exported_value_head(str(tmp_path), make_head())
+
+
+def test_openwam_sft_dataloader_concatenates_multiple_datasets(tmp_path, monkeypatch):
+    """data.train_data_paths may list several native dataset roots."""
+    import sys
+
+    from omegaconf import OmegaConf
+
+    from rlinf.data.datasets.openwam.dataloader import build_openwam_sft_dataloader
+
+    ckpt = tmp_path / "ckpt"
+    ckpt.mkdir()
+    (ckpt / "config.yaml").write_text(
+        "dataloader:\n  type: libero\n  dataset_dir: /unused\n  num_frames: 33\n"
+    )
+
+    class _FakeDataset(torch.utils.data.Dataset):
+        def __init__(self, root, length):
+            self.root = root
+            self.length = length
+
+        def __len__(self):
+            return self.length
+
+        def __getitem__(self, index):
+            return {"root": self.root, "index": index}
+
+    calls = []
+
+    def fake_build_dataset(dl_cfg, split):
+        calls.append((dl_cfg.dataset_dir, split, dl_cfg.num_frames))
+        return _FakeDataset(dl_cfg.dataset_dir, {"/a": 3, "/b": 5}[dl_cfg.dataset_dir])
+
+    registry = ModuleType("openwam.dataloader.registry")
+    registry.build_dataset = fake_build_dataset
+    monkeypatch.setitem(sys.modules, "openwam", ModuleType("openwam"))
+    monkeypatch.setitem(
+        sys.modules, "openwam.dataloader", ModuleType("openwam.dataloader")
+    )
+    monkeypatch.setitem(sys.modules, "openwam.dataloader.registry", registry)
+
+    cfg = OmegaConf.create(
+        {
+            "actor": {
+                "model": {"model_path": str(ckpt)},
+                "micro_batch_size": 2,
+                "seed": 3,
+            },
+            "data": {"openwam": {"num_frames": 9}},
+        }
+    )
+    loader, info = build_openwam_sft_dataloader(cfg, 1, 0, ["/a", "/b"])
+
+    assert calls == [("/a", "train", 9), ("/b", "train", 9)]
+    assert info["num_samples"] == 8
+    assert info["num_samples_per_dataset"] == {"/a": 3, "/b": 5}
+    assert info["dataset_dir"] == ["/a", "/b"]
+    roots = [sample["root"] for batch in loader for sample in batch]
+    assert sorted(roots) == ["/a"] * 3 + ["/b"] * 5
+
+    _, single = build_openwam_sft_dataloader(cfg, 1, 0, "/a")
+    assert single["dataset_dir"] == "/a" and single["num_samples"] == 3
+    with pytest.raises(ValueError, match="requires data.train_data_paths"):
+        build_openwam_sft_dataloader(cfg, 1, 0, [])
 
 
 def test_openwam_export_rebuilds_native_checkpoint_dir(tmp_path):

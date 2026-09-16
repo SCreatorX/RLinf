@@ -32,6 +32,48 @@ from rlinf.models.embodiment.openwam.replay import (
     pack_native_inputs,
     unpack_native_inputs,
 )
+from rlinf.utils.logging import get_logger
+
+logger = get_logger()
+
+
+EXPORTED_VALUE_HEAD_FILE = "rlinf_value_head.pt"
+
+
+def load_exported_value_head(model_path: str, value_head: nn.Module) -> bool:
+    """Reload the PPO value head saved next to an exported OpenWAM checkpoint.
+
+    ``toolkits/openwam/export_ppo_checkpoint.py`` writes the architecture weights
+    as a native OpenWAM checkpoint and keeps RLinf's ``value_head.*`` tensors in
+    ``rlinf_value_head.pt``. OpenWAM's loader ignores that file, so a PPO run
+    resumed from the export would otherwise start from a fresh critic. Returns
+    True when a value head was loaded.
+    """
+    path = os.path.join(str(model_path), EXPORTED_VALUE_HEAD_FILE)
+    if not os.path.isfile(path):
+        return False
+    state = torch.load(path, map_location="cpu", weights_only=True)
+    prefix = "value_head."
+    stripped = {
+        key[len(prefix) :] if key.startswith(prefix) else key: value
+        for key, value in state.items()
+    }
+    expected = value_head.state_dict()
+    if set(stripped) != set(expected):
+        raise ValueError(
+            f"{path} does not match the PPO value head: "
+            f"file keys {sorted(stripped)}, expected {sorted(expected)}"
+        )
+    for key, value in stripped.items():
+        if tuple(value.shape) != tuple(expected[key].shape):
+            raise ValueError(
+                f"{path} has {key} of shape {tuple(value.shape)}, "
+                f"expected {tuple(expected[key].shape)}"
+            )
+    value_head.load_state_dict(
+        {key: value.to(expected[key].dtype) for key, value in stripped.items()}
+    )
+    return True
 
 
 class OpenWAMPolicy(nn.Module, BasePolicy):
@@ -108,6 +150,7 @@ class OpenWAMPolicy(nn.Module, BasePolicy):
         noise_std: float = 0.05,
         replay_text_capacity: int = 512,
         inference_horizon: int | None = None,
+        load_value_head: bool = True,
     ) -> "OpenWAMPolicy":
         """Build OpenWAM's checkpoint loader and joint inference engine."""
         from omegaconf import OmegaConf
@@ -167,6 +210,12 @@ class OpenWAMPolicy(nn.Module, BasePolicy):
         model.to(
             device=device, dtype=torch_dtype or next(architecture.parameters()).dtype
         )
+        if load_value_head and load_exported_value_head(model_path, model.value_head):
+            logger.info(
+                "Loaded PPO value head from %s/%s",
+                model_path,
+                EXPORTED_VALUE_HEAD_FILE,
+            )
         return model
 
     def forward(self, forward_type: ForwardType = ForwardType.DEFAULT, **kwargs):

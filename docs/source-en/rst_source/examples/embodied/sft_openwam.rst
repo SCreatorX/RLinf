@@ -29,7 +29,7 @@ Overview
 
       2+ GPUs with FSDP
 
-The OpenWAM checkpoint supplies the model and dataloader settings. Set ``data.train_data_paths`` to the dataset root; the loader reads ``config.yaml`` from ``actor.model.model_path`` and keeps the native frame, action, and normalization conventions.
+The OpenWAM checkpoint supplies the model and dataloader settings. Set ``data.train_data_paths`` to the dataset root (or a list of roots: each is read with the same dataloader settings and the windows are concatenated, so the mixture is sampled in proportion to size); the loader reads ``config.yaml`` from ``actor.model.model_path`` and keeps the native frame, action, and normalization conventions.
 
 Installation
 ------------

@@ -52,7 +52,7 @@ python toolkits/openwam/export_ppo_checkpoint.py \
     --output /path/to/openwam-libero-ppo-step20 --verify cuda
 ```
 
-The exporter strips the `architecture.` prefix, drops `vlm_backbone.*` (OpenWAM stores the VLM as a directory), checks that the key set equals the source `checkpoint_step_*.safetensors`, writes `checkpoint_step_N.safetensors`, copies `config.yaml`, `normalization_stats.npy`, tokenizer and VLM directories from the source checkpoint (`--link-assets` symlinks them instead), and keeps the PPO value head in `rlinf_value_head.pt`. `--verify` reloads the result through `openwam.deploy.load_from_checkpoint_dir`. Sharded-only checkpoints (`save_full_model_weights: false`) are consolidated through `torch.distributed.checkpoint` first.
+The exporter strips the `architecture.` prefix, drops `vlm_backbone.*` (OpenWAM stores the VLM as a directory), checks that the key set equals the source `checkpoint_step_*.safetensors`, writes `checkpoint_step_N.safetensors`, copies `config.yaml`, `normalization_stats.npy`, tokenizer and VLM directories from the source checkpoint (`--link-assets` symlinks them instead), and keeps the PPO value head in `rlinf_value_head.pt`. When `actor.model.model_path` (or `rollout.model.model_path`) points at such an export, `OpenWAMPolicy.from_checkpoint` reloads that file into the value head, so a PPO run resumed from an export keeps its critic; pass `load_value_head=False` to start from a fresh head. `--verify` reloads the result through `openwam.deploy.load_from_checkpoint_dir`. Sharded-only checkpoints (`save_full_model_weights: false`) are consolidated through `torch.distributed.checkpoint` first.
 
 ## Batch sizing and validation runs
 
