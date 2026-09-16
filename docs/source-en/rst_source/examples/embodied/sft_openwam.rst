@@ -1,7 +1,7 @@
 OpenWAM Supervised Fine-Tuning
 ===============================
 
-Use this recipe to fine-tune OpenWAM on the native LIBERO dataset through RLinf's Ray-managed FSDP runner. The recipe loads OpenWAM's checkpoint directory, reuses its native dataloader and joint video/action loss, and trains the unfrozen modules with full-shard FSDP.
+Use this recipe to fine-tune OpenWAM on the native LIBERO dataset through RLinf's Ray-managed FSDP runner. See :doc:`openwam` for PPO training. The recipe loads OpenWAM's checkpoint directory, reuses its native dataloader and joint video/action loss, and trains the unfrozen modules with full-shard FSDP.
 
 Overview
 --------

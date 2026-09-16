@@ -1,7 +1,7 @@
 OpenWAM 监督微调
 =================
 
-本配方通过 RLinf 的 Ray 管理 FSDP runner，在原生 LIBERO 数据集上微调 OpenWAM。训练会从 OpenWAM checkpoint 目录读取模型配置，复用原生 dataloader 和视频、动作联合 loss，并使用 Full-shard FSDP 更新未冻结模块。
+本配方通过 RLinf 的 Ray 管理 FSDP runner，在原生 LIBERO 数据集上微调 OpenWAM。强化学习训练见 :doc:`openwam`。训练会从 OpenWAM checkpoint 目录读取模型配置，复用原生 dataloader 和视频、动作联合 loss，并使用 Full-shard FSDP 更新未冻结模块。
 
 概览
 ----

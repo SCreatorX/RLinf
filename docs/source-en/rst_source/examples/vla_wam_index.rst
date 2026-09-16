@@ -167,3 +167,4 @@ Open a model page for the full workflow and its supported environments.
    Lingbot-VLA <embodied/lingbotvla>
    Evo-1 <embodied/evo1>
    ABot-M0 <embodied/abot_m0>
+   OpenWAM <embodied/openwam>
