@@ -130,6 +130,58 @@ def test_openwam_ppo_recipes_validate(openwam_recipe, name):
     assert validate_embodied_cfg(cfg) is cfg
 
 
+@pytest.fixture
+def openwam_eval_recipe(monkeypatch):
+    import hydra
+
+    import rlinf.config as config_module
+
+    repo = Path(__file__).resolve().parents[2]
+    placement = SimpleNamespace(
+        get_world_size=lambda component: {"env": 1, "rollout": 1}.get(component, 1)
+    )
+    monkeypatch.setattr(config_module, "Cluster", lambda: object())
+    monkeypatch.setattr(
+        config_module, "HybridComponentPlacement", lambda cfg, cluster: placement
+    )
+    # The eval recipes resolve ``env/libero_*`` through ${oc.env:EMBODIED_PATH}.
+    monkeypatch.setenv("EMBODIED_PATH", str(repo / "examples/embodiment"))
+    config_dir = repo / "evaluations/libero"
+
+    def load(name, overrides=None):
+        with hydra.initialize_config_dir(
+            version_base="1.1", config_dir=str(config_dir)
+        ):
+            return hydra.compose(config_name=name, overrides=overrides or [])
+
+    return load
+
+
+@pytest.mark.parametrize(
+    ("name", "suite"),
+    [
+        ("libero_spatial_openwam_eval", "libero_spatial"),
+        ("libero_object_openwam_eval", "libero_object"),
+        ("libero_goal_openwam_eval", "libero_goal"),
+        ("libero_10_openwam_eval", "libero_10"),
+    ],
+)
+def test_openwam_libero_eval_recipes_validate(openwam_eval_recipe, name, suite):
+    """Every LIBERO suite recipe shares the deploy settings of the spatial one."""
+    from rlinf.config import validate_cfg
+
+    cfg = openwam_eval_recipe(name)
+    cfg.runner.task_type = "embodied_eval"
+    cfg = validate_cfg(cfg)
+    assert cfg.env.eval.task_suite_name == suite
+    assert cfg.env.eval.openwam_action_representation == "native_delta_eef10"
+    # OpenWAM's own LIBERO client caps every suite at 600 steps.
+    assert cfg.env.eval.max_episode_steps == 600
+    assert cfg.rollout.model.openwam.inference_horizon == 10
+    assert cfg.rollout.model.num_action_chunks == 10
+    assert cfg.runner.logger.experiment_name == f"{suite}_openwam_eval"
+
+
 @pytest.mark.parametrize(
     ("overrides", "message"),
     [

@@ -13,7 +13,7 @@ LIBERO 是基于 robosuite（MuJoCo）的机器人操作仿真基准，涵盖 Sp
    bash requirements/install.sh embodied --model openpi --env libero
    source .venv/bin/activate
 
-支持的模型包括 ``openpi``、``openvla-oft``、``starvla``、``dreamzero`` 和 ``molmoact2``，安装时替换 ``--model`` 参数即可。
+支持的模型包括 ``openpi``、``openvla-oft``、``starvla``、``dreamzero``、``molmoact2`` 和 ``openwam``，安装时替换 ``--model`` 参数即可。
 
 示例配置
 --------
@@ -42,6 +42,18 @@ LIBERO 是基于 robosuite（MuJoCo）的机器人操作仿真基准，涵盖 Sp
    * - ``libero_spatial_molmoact2_eval.yaml``
      - Spatial
      - MolmoAct2
+   * - ``libero_spatial_openwam_eval.yaml``
+     - Spatial
+     - OpenWAM
+   * - ``libero_object_openwam_eval.yaml``
+     - Object
+     - OpenWAM
+   * - ``libero_goal_openwam_eval.yaml``
+     - Goal
+     - OpenWAM
+   * - ``libero_10_openwam_eval.yaml``
+     - LIBERO-10
+     - OpenWAM
    * - ``libero_object_openpi_pi05_eval.yaml``
      - Object
      - π₀.₅
