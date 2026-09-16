@@ -122,13 +122,19 @@ def openwam_recipe(monkeypatch):
         "libero_spatial_ppo_openwam",
         "libero_spatial_ppo_openwam_smoke",
         "libero_spatial_ppo_openwam_long",
+        "robotwin_click_bell_ppo_openwam",
     ],
 )
-def test_openwam_ppo_recipes_validate(openwam_recipe, name):
+def test_openwam_ppo_recipes_validate(openwam_recipe, name, monkeypatch):
     from rlinf.config import validate_embodied_cfg
 
+    monkeypatch.setenv("REPO_PATH", str(Path(__file__).resolve().parents[2]))
     cfg = openwam_recipe(name)
     assert validate_embodied_cfg(cfg) is cfg
+    if name.startswith("robotwin"):
+        assert cfg.env.train.openwam_action_representation == "absolute_eef20"
+        assert cfg.env.train.task_config.data_type.endpose is True
+        assert cfg.actor.model.num_action_chunks == cfg.actor.model.num_frames - 1
 
 
 @pytest.fixture

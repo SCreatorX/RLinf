@@ -84,6 +84,7 @@ Config files
 - ``examples/embodiment/config/libero_spatial_ppo_openwam.yaml``: the full recipe (64 environments, 8 rollout epochs).
 - ``examples/embodiment/config/libero_spatial_ppo_openwam_long.yaml``: sustained validation (8 environments, 320-step episodes, 4 denoising steps, 20 iterations).
 - ``examples/embodiment/config/libero_spatial_ppo_openwam_smoke.yaml`` and ``tests/e2e_tests/embodied/libero_spatial_ppo_openwam.yaml``: smoke recipes.
+- ``examples/embodiment/config/robotwin_click_bell_ppo_openwam.yaml``: PPO on RoboTwin click_bell (aloha-agilex, 20-D absolute EEF, whole 32-step chunks, 4 environments and 52 samples per iteration); the env adapter is described in :doc:`../../evaluations/guides/robotwin`. Not yet exercised in a live RoboTwin environment.
 
 Key snippet:
 

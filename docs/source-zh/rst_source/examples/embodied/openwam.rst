@@ -84,6 +84,7 @@ LIBERO 的 EGL 渲染需要 GLVND 的 ``libEGL.so.1``（Debian/Ubuntu 上为 ``a
 - ``examples/embodiment/config/libero_spatial_ppo_openwam.yaml``：完整配方（64 环境、8 个 rollout epoch）。
 - ``examples/embodiment/config/libero_spatial_ppo_openwam_long.yaml``：持续验证配方（8 环境、320 步 episode、4 步去噪、20 轮）。
 - ``examples/embodiment/config/libero_spatial_ppo_openwam_smoke.yaml`` 与 ``tests/e2e_tests/embodied/libero_spatial_ppo_openwam.yaml``：冒烟配方。
+- ``examples/embodiment/config/robotwin_click_bell_ppo_openwam.yaml``：RoboTwin click_bell 上的 PPO（aloha-agilex，20 维绝对 EEF，整块 32 步，每轮 4 环境 52 个样本），环境适配见 :doc:`../../evaluations/guides/robotwin`；尚未在真实 RoboTwin 环境里跑过。
 
 关键片段：
 
