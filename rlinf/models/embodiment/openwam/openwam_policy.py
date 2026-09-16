@@ -123,6 +123,11 @@ class OpenWAMPolicy(nn.Module, BasePolicy):
         engine_cfg = getattr(engine, "cfg", None)
         dataloader_cfg = getattr(engine_cfg, "dataloader", None)
         self._multiview = bool(getattr(dataloader_cfg, "multiview", False))
+        # RoboTwin-style readers wrap every instruction in a fixed sentence at
+        # training time; LIBERO does not. Match the checkpoint's reader.
+        self._prompt_template = _prompt_template_for_dataset(
+            getattr(dataloader_cfg, "type", None)
+        )
         layout = getattr(dataloader_cfg, "camera_layout", None)
         self._camera_layout = (
             list(layout)
@@ -382,6 +387,13 @@ class OpenWAMPolicy(nn.Module, BasePolicy):
             "loss_action": result.get("loss_action", result["loss"].detach()),
         }
 
+    def _format_prompt(self, prompt: Any) -> str:
+        """Apply the checkpoint reader's instruction template, if it has one."""
+        text = "" if prompt is None else str(prompt)
+        if self._prompt_template is None:
+            return text
+        return self._prompt_template + text
+
     def predict_action_batch(
         self, env_obs: dict[str, Any], mode: str = "eval", **kwargs
     ):
@@ -401,18 +413,20 @@ class OpenWAMPolicy(nn.Module, BasePolicy):
             )
             image = _compose_observation_image(
                 main_image,
-                _to_pil(wrist_image) if wrist_image is not None else None,
+                wrist_image,
                 multiview=self._multiview,
                 camera_layout=self._camera_layout,
                 height=self.height,
                 width=self.width,
             )
             condition = {
-                "prompt": _batch_value(
-                    env_obs,
-                    ("task_descriptions", "task_description", "language"),
-                    index,
-                    "",
+                "prompt": self._format_prompt(
+                    _batch_value(
+                        env_obs,
+                        ("task_descriptions", "task_description", "language"),
+                        index,
+                        "",
+                    )
                 ),
                 "first_frame_image": [image],
                 "proprio": _observation_proprio(env_obs, index),
@@ -456,7 +470,7 @@ class OpenWAMPolicy(nn.Module, BasePolicy):
             wrist = _batch_value(env_obs, ("wrist_images", "wrist_image"), index, None)
             image = _compose_observation_image(
                 main,
-                _to_pil(wrist) if wrist is not None else None,
+                wrist,
                 multiview=self._multiview,
                 camera_layout=self._camera_layout,
                 height=self.height,
@@ -471,11 +485,13 @@ class OpenWAMPolicy(nn.Module, BasePolicy):
                 or action_shift
             )
             native = self.architecture.video_backbone.preprocess_input_for_inference(
-                prompt=_batch_value(
-                    env_obs,
-                    ("task_descriptions", "task_description", "language"),
-                    index,
-                    "",
+                prompt=self._format_prompt(
+                    _batch_value(
+                        env_obs,
+                        ("task_descriptions", "task_description", "language"),
+                        index,
+                        "",
+                    )
                 ),
                 first_frame_image=[image],
                 num_frames=self.num_frames,
@@ -496,11 +512,13 @@ class OpenWAMPolicy(nn.Module, BasePolicy):
                     raise NotImplementedError(
                         "OpenWAM tri-system PPO requires a frozen VLM backbone"
                     )
-                prompt = _batch_value(
-                    env_obs,
-                    ("task_descriptions", "task_description", "language"),
-                    index,
-                    "",
+                prompt = self._format_prompt(
+                    prompt=_batch_value(
+                        env_obs,
+                        ("task_descriptions", "task_description", "language"),
+                        index,
+                        "",
+                    )
                 )
                 vlm_inputs = vlm_backbone.prepare_vlm_inputs([prompt], [image])
                 native["vlm_hidden"] = vlm_backbone.extract_features(
@@ -790,23 +808,77 @@ def _libero_state_to_eef10(value: Any) -> np.ndarray | None:
     ).astype(np.float32)
 
 
+ROBOTWIN_PROMPT_PREFIX = (
+    "A video recorded from a robot's point of view executing the following "
+    "instruction: "
+)
+_TEMPLATED_DATASET_TYPES = ("robotwin", "robodojo", "ebench")
+
+
+def _prompt_template_for_dataset(dataset_type: Any) -> str | None:
+    """Return the training-time instruction prefix of an OpenWAM dataset reader."""
+    if dataset_type is None or str(dataset_type) not in _TEMPLATED_DATASET_TYPES:
+        return None
+    try:
+        from openwam.dataloader.transforms.multiview import (
+            format_prompt_for_inference,
+        )
+
+        return format_prompt_for_inference("")
+    except ImportError:
+        return ROBOTWIN_PROMPT_PREFIX
+
+
+def _wrist_frames(value: Any) -> list[Image.Image]:
+    """Split a wrist observation into per-camera PIL frames, in layout order.
+
+    RLinf environments hand back either one wrist image (``[H, W, 3]``) or a
+    stack of them (``[n, H, W, 3]``; RoboTwin stacks left then right).
+    """
+    if value is None:
+        return []
+    if isinstance(value, Image.Image):
+        return [value]
+    if isinstance(value, (list, tuple)):
+        return [_to_pil(item) for item in value if item is not None]
+    if isinstance(value, torch.Tensor):
+        value = value.detach().cpu().numpy()
+    array = np.asarray(value)
+    if array.ndim == 4:
+        return [_to_pil(frame) for frame in array]
+    return [_to_pil(array)]
+
+
 def _compose_observation_image(
     main_image: Image.Image,
-    wrist_image: Image.Image | None,
+    wrist_image: Any,
     *,
     multiview: bool,
     camera_layout: list[str],
     height: int,
     width: int,
 ) -> Image.Image:
-    """Match OpenWAM's single-view or three-camera training layout."""
+    """Match OpenWAM's single-view or three-camera training layout.
+
+    Single-view checkpoints see the head camera center-cropped and resized to
+    the training canvas, as ``openwam.deploy.obs_preprocess`` does. Multiview
+    checkpoints get the head camera in slot 0 and the wrist cameras in the
+    following slots of ``camera_layout``; missing cameras stay black, exactly
+    like the dataset reader pads them.
+    """
+    from openwam.dataloader.transforms.multiview import (
+        assemble_multiview_layout,
+        crop_and_resize,
+    )
+
     if not multiview:
-        return main_image
-    from openwam.dataloader.transforms.multiview import assemble_multiview_layout
+        if main_image.size == (width, height):
+            return main_image
+        return crop_and_resize(main_image, height, width)
 
     frames = {camera_layout[0]: main_image}
-    if wrist_image is not None and len(camera_layout) > 1:
-        frames[camera_layout[1]] = wrist_image
+    for slot, frame in zip(camera_layout[1:], _wrist_frames(wrist_image)):
+        frames[slot] = frame
     return assemble_multiview_layout(
         frames,
         camera_layout=camera_layout,

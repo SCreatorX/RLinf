@@ -85,6 +85,12 @@ RoboTwin 是双臂操作仿真平台，提供放置、调整、点击等多种�
    * - ``robotwin_click_bell_lingbotvla_eval.yaml``
      - click_bell
      - LingBotVLA
+   * - ``robotwin_click_bell_openwam_eval.yaml``
+     - click_bell
+     - OpenWAM
+   * - ``robotwin_place_empty_cup_openwam_eval.yaml``
+     - place_empty_cup
+     - OpenWAM
 
 若 ``evaluations/robotwin/<config>.yaml`` 不存在，``run_eval.sh`` 会回退到 ``examples/embodiment/config/`` 下同名配置（需设置 ``runner.only_eval: True`` 与 ``runner.task_type: embodied_eval``）。``rlinf/envs/sim/robotwin/seeds/eval_seeds.json`` 中另有 **22 个任务** 的评测种子，其余任务可从训练配置派生评测 YAML（见 :doc:`../reference/configuration`）。
 
@@ -205,6 +211,15 @@ LingBotVLA
 - 除 ``rollout.model.model_path`` 外，还须配置 ``tokenizer_path`` 与 ``rollout.model.lingbotvla.config_path``
 - ``rollout.model.num_action_chunks: 50``；``max_episode_steps: 400`` （``click_bell``、``place_shoe`` 等）
 - ``use_custom_reward: False`` （须关闭自定义奖励）
+
+OpenWAM（RoboTwin study checkpoint，demo_randomized 协议）
+
+- ``task_config.embodiment: [aloha-agilex]``、``center_crop: False``、``task_config.camera.collect_wrist_camera: true``：三相机按 checkpoint 的 ``camera_layout`` 拼成 384×320 画布（头部相机在上，左右腕相机在下）
+- ``env.eval.openwam_action_representation: absolute_eef20``：checkpoint 输出 20 维绝对双臂末端位姿 ``[l_xyz, l_rot6d, l_grip, r_xyz, r_rot6d, r_grip]``，RLinf 转成 16 维 ``xyz+quat_xyzw+gripper`` 并让每个子环境走 RoboTwin 的 ``ee`` 控制器；同时把同一表示的 20 维 ``native_proprio`` 交给模型
+- ``task_config.data_type.endpose: true``，让 RoboTwin 发布末端位姿
+- ``rollout.model.num_action_chunks: 32``、``openwam.inference_horizon: null``：与 OpenWAM 自己的 RoboTwin 客户端一样整块执行 32 步；``max_episode_steps`` 与 ``step_lim`` 取 preset 步数向上取到 32 的倍数（click_bell 416、place_empty_cup 224）
+- prompt 会自动套上 checkpoint 训练时的固定前缀，无需在配置里写
+- 域随机化沿用 preset 默认（对应 OpenWAM 论文的 randomized 设置）；要复现 clean 协议时关闭全部 ``task_config.domain_randomization``
 
 覆盖完整测试集
 ~~~~~~~~~~~~~~

@@ -206,5 +206,5 @@ Known limitations
 
 - The video stream is deterministic conditioning in this PPO port; the action likelihood is a denoising-transition surrogate, not the exact marginal after integrating over video trajectories.
 - Only the Wan2.2 dual-system checkpoint has run full PPO on LIBERO; the other architectures are validated at model level only and Cosmos-Predict2.5 is untested.
-- LIBERO is the only environment so far. Robotwin's 20-D proprioception can be fed through ``native_proprio``, but the environment adapter is not wired yet.
+- Full PPO has only run on LIBERO. The RoboTwin evaluation adapter is wired (``evaluations/robotwin/robotwin_{click_bell,place_empty_cup}_openwam_eval.yaml``, see :doc:`../../evaluations/guides/robotwin`) but has not been exercised in a live RoboTwin environment yet.
 - Multiple LIBERO renderers on one GPU crash, which bounds the number of environments per node.

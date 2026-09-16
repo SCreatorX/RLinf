@@ -84,6 +84,12 @@ Available under ``evaluations/robotwin/``:
    * - ``robotwin_click_bell_lingbotvla_eval.yaml``
      - click_bell
      - LingBotVLA
+   * - ``robotwin_click_bell_openwam_eval.yaml``
+     - click_bell
+     - OpenWAM
+   * - ``robotwin_place_empty_cup_openwam_eval.yaml``
+     - place_empty_cup
+     - OpenWAM
 
 If ``evaluations/robotwin/<config>.yaml`` does not exist, ``run_eval.sh`` falls back to the same name under ``examples/embodiment/config/`` (set ``runner.only_eval: True`` and ``runner.task_type: embodied_eval``). ``rlinf/envs/sim/robotwin/seeds/eval_seeds.json`` contains eval seeds for **22 tasks**; other tasks can be derived from training configs (see :doc:`../reference/configuration`).
 
@@ -204,6 +210,15 @@ LingBotVLA
 - Besides ``rollout.model.model_path``, also set ``tokenizer_path`` and ``rollout.model.lingbotvla.config_path``
 - ``rollout.model.num_action_chunks: 50``; ``max_episode_steps: 400`` (e.g. ``click_bell``, ``place_shoe``)
 - ``use_custom_reward: False`` (disable custom reward during evaluation)
+
+OpenWAM (RoboTwin study checkpoints, demo_randomized protocol)
+
+- ``task_config.embodiment: [aloha-agilex]``, ``center_crop: False``, ``task_config.camera.collect_wrist_camera: true``: the three cameras are composed onto the checkpoint's 384x320 ``camera_layout`` canvas (head on top, left/right wrist below)
+- ``env.eval.openwam_action_representation: absolute_eef20``: the checkpoint predicts 20-D absolute dual-arm end-effector poses ``[l_xyz, l_rot6d, l_grip, r_xyz, r_rot6d, r_grip]``; RLinf converts them to 16-D ``xyz+quat_xyzw+gripper`` and switches every sub-environment to RoboTwin's ``ee`` controller, and feeds the model a 20-D ``native_proprio`` in the same representation
+- ``task_config.data_type.endpose: true`` so RoboTwin publishes the end-effector poses
+- ``rollout.model.num_action_chunks: 32`` with ``openwam.inference_horizon: null``: whole 32-step chunks, like OpenWAM's own RoboTwin client; ``max_episode_steps`` and ``step_lim`` are the preset budget rounded up to a multiple of 32 (click_bell 416, place_empty_cup 224)
+- The training-time prompt prefix is applied automatically; nothing to configure
+- Domain randomization keeps the preset default (the paper's randomized setting); disable every ``task_config.domain_randomization`` field for the clean protocol
 
 Covering the full test set
 ~~~~~~~~~~~~~~~~~~~~~~~~~~

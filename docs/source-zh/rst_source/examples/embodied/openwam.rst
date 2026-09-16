@@ -206,5 +206,5 @@ FSDP actor 把整个 ``OpenWAMPolicy`` 的 state dict 保存到 ``<log_path>/<ex
 
 - 视频流在这一版 PPO 中是确定性条件，动作似然是去噪转移的代理量，不是对视频轨迹积分后的精确边际似然。
 - 只有 Wan2.2 双系统在 LIBERO 上跑过完整 PPO，其他架构只做过模型级校验；Cosmos-Predict2.5 未测试。
-- 环境目前只有 LIBERO，Robotwin 的 20 维本体感知可以通过 ``native_proprio`` 直接送入，但环境适配尚未接入。
+- 完整 PPO 只在 LIBERO 上跑过。RoboTwin 的评测适配已接入（``evaluations/robotwin/robotwin_{click_bell,place_empty_cup}_openwam_eval.yaml``，见 :doc:`../../evaluations/guides/robotwin`），尚未在真实 RoboTwin 环境里跑过验证。
 - 同一 GPU 上多个 LIBERO 渲染子进程会崩溃，限制了单机可用的环境数。

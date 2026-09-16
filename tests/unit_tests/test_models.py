@@ -150,9 +150,10 @@ def openwam_eval_recipe(monkeypatch):
     )
     # The eval recipes resolve ``env/libero_*`` through ${oc.env:EMBODIED_PATH}.
     monkeypatch.setenv("EMBODIED_PATH", str(repo / "examples/embodiment"))
-    config_dir = repo / "evaluations/libero"
+    monkeypatch.setenv("REPO_PATH", str(repo))
 
-    def load(name, overrides=None):
+    def load(name, overrides=None, subdir="libero"):
+        config_dir = repo / "evaluations" / subdir
         with hydra.initialize_config_dir(
             version_base="1.1", config_dir=str(config_dir)
         ):
@@ -1209,6 +1210,197 @@ def _make_rlinf_checkpoint(tmp_path: Path, extra: dict | None = None) -> Path:
     state.update(extra or {})
     torch.save(state, step_dir / "actor" / "model_state_dict" / "full_weights.pt")
     return step_dir
+
+
+@pytest.mark.parametrize(
+    ("name", "task", "steps"),
+    [
+        ("robotwin_click_bell_openwam_eval", "click_bell", 416),
+        ("robotwin_place_empty_cup_openwam_eval", "place_empty_cup", 224),
+    ],
+)
+def test_openwam_robotwin_eval_recipes_validate(openwam_eval_recipe, name, task, steps):
+    """RoboTwin recipes switch the env to EEF control and publish endposes."""
+    from rlinf.config import validate_cfg
+
+    cfg = openwam_eval_recipe(name, subdir="robotwin")
+    cfg.runner.task_type = "embodied_eval"
+    cfg = validate_cfg(cfg)
+    env = cfg.env.eval
+    assert env.env_type == "robotwin"
+    assert env.task_config.task_name == task
+    assert env.openwam_action_representation == "absolute_eef20"
+    assert env.task_config.data_type.endpose is True
+    assert env.task_config.camera.collect_wrist_camera is True
+    assert list(env.task_config.embodiment) == ["aloha-agilex"]
+    assert env.center_crop is False
+    assert env.max_episode_steps == env.task_config.step_lim == steps
+    assert env.max_steps_per_rollout_epoch % cfg.rollout.model.num_action_chunks == 0
+    assert cfg.rollout.model.action_dim == 20
+    assert cfg.rollout.model.openwam.inference_horizon is None
+
+
+def test_openwam_eef20_to_robotwin_ee16_layout():
+    from rlinf.envs.action_utils import _openwam_eef20_to_robotwin_ee16
+    from rlinf.utils.rot6d import quat_xyzw_to_rot6d
+
+    left_q = np.array([0.0, 0.0, np.sin(0.3), np.cos(0.3)], dtype=np.float32)
+    right_q = np.array([np.sin(0.2), 0.0, 0.0, np.cos(0.2)], dtype=np.float32)
+    action = np.concatenate(
+        [
+            [0.1, 0.2, 0.3],
+            quat_xyzw_to_rot6d(left_q),
+            [0.9],
+            [-0.1, -0.2, -0.3],
+            quat_xyzw_to_rot6d(right_q),
+            [0.1],
+        ]
+    ).astype(np.float32)
+    chunk = np.stack([action, action])[None]  # [1 env, 2 steps, 20]
+
+    ee = _openwam_eef20_to_robotwin_ee16(chunk)
+    assert ee.shape == (1, 2, 16)
+    step = ee[0, 0]
+    np.testing.assert_allclose(step[0:3], [0.1, 0.2, 0.3], atol=1e-6)
+    np.testing.assert_allclose(step[8:11], [-0.1, -0.2, -0.3], atol=1e-6)
+    assert step[7] == pytest.approx(0.9) and step[15] == pytest.approx(0.1)
+    for got, want in ((step[3:7], left_q), (step[11:15], right_q)):
+        sign = np.sign(np.dot(got, want)) or 1.0
+        np.testing.assert_allclose(sign * got, want, atol=1e-5)
+
+    with pytest.raises(ValueError, match="20-D EEF actions"):
+        _openwam_eef20_to_robotwin_ee16(np.zeros((1, 2, 14)))
+    bad = chunk.copy()
+    bad[0, 0, 0] = np.nan
+    with pytest.raises(ValueError, match="non-finite"):
+        _openwam_eef20_to_robotwin_ee16(bad)
+
+
+def test_prepare_actions_robotwin_requires_openwam_representation():
+    from rlinf.envs.action_utils import prepare_actions
+
+    joint = np.zeros((1, 3, 14), dtype=np.float32)
+    # Joint-space policies pass through untouched, with or without the flag.
+    out = prepare_actions(joint, "robotwin", "openpi", 3, 14, env_cfg={})
+    assert out is joint
+
+    eef = np.zeros((1, 3, 20), dtype=np.float32)
+    eef[..., 3] = eef[..., 7] = eef[..., 13] = eef[..., 17] = 1.0  # identity rot6d
+    with pytest.raises(ValueError, match="openwam_action_representation"):
+        prepare_actions(eef, "robotwin", "openwam", 32, 20, env_cfg={})
+    out = prepare_actions(
+        eef,
+        "robotwin",
+        "openwam",
+        32,
+        20,
+        env_cfg={"openwam_action_representation": "absolute_eef20"},
+    )
+    assert out.shape == (1, 3, 16)
+    np.testing.assert_allclose(out[0, 0, 3:7], [0.0, 0.0, 0.0, 1.0], atol=1e-6)
+
+
+def test_robotwin_env_eef_proprio_and_action_type_binding():
+    from rlinf.envs.sim.robotwin.robotwin_env import (
+        bind_robotwin_action_type,
+        robotwin_task_eef20_proprio,
+    )
+
+    class _Robot:
+        def get_left_gripper_val(self):
+            return 0.25
+
+        def get_right_gripper_val(self):
+            return np.array([0.75])
+
+    class _Task:
+        def __init__(self):
+            self.robot = _Robot()
+            self.calls = []
+
+        def get_arm_pose(self, arm):
+            pose = [0.1, 0.2, 0.3, 0.0, 0.0, 0.0, 1.0]
+            return pose if arm == "left" else [-p for p in pose[:3]] + pose[3:]
+
+        def gen_sparse_reward_data(self, chunk_actions, action_type="qpos"):
+            self.calls.append((chunk_actions.shape, action_type))
+            return None
+
+    task = _Task()
+    proprio = robotwin_task_eef20_proprio(task)
+    assert proprio.shape == (20,) and proprio.dtype == np.float32
+    np.testing.assert_allclose(proprio[0:3], [0.1, 0.2, 0.3])
+    np.testing.assert_allclose(proprio[3:9], [1, 0, 0, 0, 1, 0])  # identity rot6d
+    assert proprio[9] == pytest.approx(0.25) and proprio[19] == pytest.approx(0.75)
+    np.testing.assert_allclose(proprio[10:13], [-0.1, -0.2, -0.3])
+
+    venv = SimpleNamespace(
+        envs=[SimpleNamespace(task=task), SimpleNamespace(task=_Task())]
+    )
+    assert bind_robotwin_action_type(venv, "ee") == 2
+    assert bind_robotwin_action_type(venv, "ee") == 0  # idempotent
+    venv.envs[0].task.gen_sparse_reward_data(np.zeros((32, 16)))
+    assert task.calls == [((32, 16), "ee")]
+    # Switching back restores joint control on the same original method.
+    assert bind_robotwin_action_type(venv, "qpos") == 2
+    venv.envs[0].task.gen_sparse_reward_data(np.zeros((4, 14)))
+    assert task.calls[-1] == ((4, 14), "qpos")
+    with pytest.raises(ValueError, match="Unsupported RoboTwin action_type"):
+        bind_robotwin_action_type(venv, "eef")
+
+
+def test_openwam_prompt_template_follows_dataset_type():
+    from rlinf.models.embodiment.openwam.openwam_policy import (
+        ROBOTWIN_PROMPT_PREFIX,
+        _prompt_template_for_dataset,
+    )
+
+    assert _prompt_template_for_dataset("libero") is None
+    assert _prompt_template_for_dataset(None) is None
+    template = _prompt_template_for_dataset("robotwin")
+    assert template == ROBOTWIN_PROMPT_PREFIX
+    assert template.startswith("A video recorded from a robot's point of view")
+
+
+def test_openwam_compose_fills_every_camera_slot():
+    """Head on top, left/right wrists below; single-view crops to the canvas."""
+    pytest.importorskip("openwam.dataloader.transforms.multiview")
+    from PIL import Image
+
+    from rlinf.models.embodiment.openwam.openwam_policy import (
+        _compose_observation_image,
+    )
+
+    def solid(color, size=(64, 48)):
+        return np.full((size[1], size[0], 3), color, dtype=np.uint8)
+
+    head = Image.fromarray(solid((255, 0, 0)))
+    wrists = np.stack([solid((0, 255, 0)), solid((0, 0, 255))])  # [2, H, W, 3]
+    layout = ["head_camera", "left_camera", "right_camera"]
+    image = _compose_observation_image(
+        head, wrists, multiview=True, camera_layout=layout, height=384, width=320
+    )
+    array = np.asarray(image)
+    assert array.shape == (384, 320, 3)
+    assert tuple(array[100, 160]) == (255, 0, 0)
+    assert tuple(array[320, 80]) == (0, 255, 0)
+    assert tuple(array[320, 240]) == (0, 0, 255)
+    # One wrist camera only: the right slot stays black, as in the dataset reader.
+    array = np.asarray(
+        _compose_observation_image(
+            head, wrists[0], multiview=True, camera_layout=layout, height=384, width=320
+        )
+    )
+    assert tuple(array[320, 80]) == (0, 255, 0) and tuple(array[320, 240]) == (0, 0, 0)
+    single = _compose_observation_image(
+        Image.fromarray(solid((9, 9, 9), size=(640, 480))),
+        None,
+        multiview=False,
+        camera_layout=layout,
+        height=384,
+        width=320,
+    )
+    assert single.size == (320, 384)
 
 
 def test_openwam_exported_value_head_reloads(tmp_path):

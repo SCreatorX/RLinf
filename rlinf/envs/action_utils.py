@@ -75,6 +75,61 @@ def prepare_actions_for_maniskill(
     return chunk_actions
 
 
+OPENWAM_ROBOTWIN_REPRESENTATIONS = ("absolute_eef20",)
+
+
+def _openwam_eef20_to_robotwin_ee16(chunk_actions) -> np.ndarray:
+    """Convert OpenWAM's 20-D dual-arm EEF actions to RoboTwin's 16-D ``ee`` actions.
+
+    OpenWAM RoboTwin checkpoints (``dataloader.action_mode: eef``) predict
+    ``[l_xyz(3), l_rot6d(6), l_grip(1), r_xyz(3), r_rot6d(6), r_grip(1)]`` in
+    the same absolute end-effector frame as the ``endpose`` fields of the
+    RoboTwin dataset. RoboTwin's ``take_action(..., action_type="ee")`` wants
+    ``[l_xyz(3), l_quat_xyzw(4), l_grip(1), r_xyz(3), r_quat_xyzw(4), r_grip(1)]``;
+    the gripper stays a raw ``[0, 1]`` opening (1 = open), exactly as trained.
+    Mirrors ``benchmarks/utils/action_conversion.eef20d_to_ee16d`` in OpenWAM.
+    """
+    from rlinf.utils.rot6d import rot6d_to_quat_xyzw
+
+    raw = np.asarray(chunk_actions, dtype=np.float32)
+    if raw.shape[-1] != 20:
+        raise ValueError(
+            f"OpenWAM RoboTwin rollout expects 20-D EEF actions, got {raw.shape}"
+        )
+    if not np.isfinite(raw).all():
+        raise ValueError("OpenWAM RoboTwin rollout produced non-finite actions")
+    flat = raw.reshape(-1, 20)
+    out = np.empty((flat.shape[0], 16), dtype=np.float32)
+    for row, action in enumerate(flat):
+        out[row, 0:3] = action[0:3]
+        out[row, 3:7] = rot6d_to_quat_xyzw(action[3:9].astype(np.float64))
+        out[row, 7] = action[9]
+        out[row, 8:11] = action[10:13]
+        out[row, 11:15] = rot6d_to_quat_xyzw(action[13:19].astype(np.float64))
+        out[row, 15] = action[19]
+    return out.reshape(*raw.shape[:-1], 16)
+
+
+def prepare_actions_for_robotwin(
+    raw_chunk_actions,
+    model_type,
+    env_cfg=None,
+) -> np.ndarray:
+    """RoboTwin consumes 14-D joint actions as-is; OpenWAM needs the EEF bridge."""
+    if SupportedModel(model_type) != SupportedModel.OPENWAM:
+        return raw_chunk_actions
+    representation = (
+        None if env_cfg is None else env_cfg.get("openwam_action_representation", None)
+    )
+    if representation not in OPENWAM_ROBOTWIN_REPRESENTATIONS:
+        raise ValueError(
+            "OpenWAM RoboTwin requires env.<split>.openwam_action_representation "
+            f"to be one of {OPENWAM_ROBOTWIN_REPRESENTATIONS}, got {representation!r}. "
+            "It switches RoboTwinEnv to end-effector control and 20-D native proprio."
+        )
+    return _openwam_eef20_to_robotwin_ee16(raw_chunk_actions)
+
+
 def prepare_actions_for_libero(
     raw_chunk_actions,
     model_type,
@@ -479,7 +534,11 @@ def prepare_actions(
             policy=policy,
         )
     elif env_type == SupportedEnvType.ROBOTWIN:
-        chunk_actions = raw_chunk_actions
+        chunk_actions = prepare_actions_for_robotwin(
+            raw_chunk_actions=raw_chunk_actions,
+            model_type=model_type,
+            env_cfg=env_cfg,
+        )
     elif env_type == SupportedEnvType.EMBODICHAIN:
         chunk_actions = raw_chunk_actions
     elif env_type == SupportedEnvType.METAWORLD:
