@@ -218,6 +218,7 @@ OpenWAM (RoboTwin study checkpoints, demo_randomized protocol)
 - ``task_config.data_type.endpose: true`` so RoboTwin publishes the end-effector poses
 - ``rollout.model.num_action_chunks: 32`` with ``openwam.inference_horizon: null``: whole 32-step chunks, like OpenWAM's own RoboTwin client; ``max_episode_steps`` and ``step_lim`` are the preset budget rounded up to a multiple of 32 (click_bell 416, place_empty_cup 224)
 - The training-time prompt prefix is applied automatically; nothing to configure
+- Every end-effector target is planned individually through RoboTwin's ``take_action(..., action_type="ee")`` (mplib), about 25 to 30 s per 32-step chunk; SAPIEN needs a ``DISPLAY`` (start ``Xvfb :99`` on headless nodes) and the sapien/mplib patches from ``install_robotwin_env`` in ``requirements/install.sh``
 - Domain randomization keeps the preset default (the paper's randomized setting); disable every ``task_config.domain_randomization`` field for the clean protocol
 
 Covering the full test set

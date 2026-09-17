@@ -219,6 +219,7 @@ OpenWAM（RoboTwin study checkpoint，demo_randomized 协议）
 - ``task_config.data_type.endpose: true``，让 RoboTwin 发布末端位姿
 - ``rollout.model.num_action_chunks: 32``、``openwam.inference_horizon: null``：与 OpenWAM 自己的 RoboTwin 客户端一样整块执行 32 步；``max_episode_steps`` 与 ``step_lim`` 取 preset 步数向上取到 32 的倍数（click_bell 416、place_empty_cup 224）
 - prompt 会自动套上 checkpoint 训练时的固定前缀，无需在配置里写
+- 每个末端目标都经 RoboTwin 的 ``take_action(..., action_type="ee")`` 单独规划（mplib），一个 32 步 chunk 约 25 到 30 秒；SAPIEN 需要 ``DISPLAY``（无头机器先起 ``Xvfb :99``），并按 ``requirements/install.sh`` 的 ``install_robotwin_env`` 给 sapien/mplib 打补丁
 - 域随机化沿用 preset 默认（对应 OpenWAM 论文的 randomized 设置）；要复现 clean 协议时关闭全部 ``task_config.domain_randomization``
 
 覆盖完整测试集
