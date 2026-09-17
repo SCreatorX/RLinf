@@ -72,15 +72,60 @@ def robotwin_task_eef20_proprio(task: Any) -> np.ndarray:
     return proprio
 
 
+def execute_robotwin_ee_chunk(task: Any, chunk_actions: Any):
+    """Run a chunk of 16-D ``ee`` actions on a RoboTwin task, one target at a time.
+
+    ``gen_sparse_reward_data`` accepts an ``action_type`` argument but always
+    slices the chunk as joint targets (6 + 1 + 6 + 1) and TOPPs the joint path,
+    so 16-D end-effector chunks would drive the arms to garbage. ``take_action``
+    does handle ``action_type="ee"`` (7-D pose + gripper per arm, planned with
+    the arm's motion planner), so replay the chunk through it and reproduce the
+    sparse-reward bookkeeping of ``gen_sparse_reward_data``: success on the
+    task's ``eval_success`` flag, truncation when ``take_action_cnt`` reaches
+    ``step_lim``. Returns ``(reward, termination, truncation, infos)`` shaped
+    like the original so ``VectorEnv.step`` can consume it unchanged.
+    """
+    infos = {"success": False}
+    reward = np.zeros(1, dtype=np.float32)
+    termination = np.zeros(1, dtype=np.int32)
+    truncation = np.zeros(1, dtype=np.int32)
+
+    def _finish():
+        if getattr(task, "eval_success", False):
+            infos["success"] = True
+            reward[:] = 1
+            termination[:] = 1
+        elif task.take_action_cnt >= task.step_lim:
+            truncation[:] = 1
+        return reward, termination, truncation, infos
+
+    if getattr(task, "eval_success", False) or task.take_action_cnt >= task.step_lim:
+        return _finish()
+    actions = np.asarray(chunk_actions, dtype=np.float32)
+    if actions.ndim == 1:
+        actions = actions[None]
+    if actions.shape[-1] != 16:
+        raise ValueError(
+            f"RoboTwin ee control expects 16-D actions per step, got {actions.shape}"
+        )
+    for action in actions:
+        if (
+            getattr(task, "eval_success", False)
+            or task.take_action_cnt >= task.step_lim
+        ):
+            break
+        task.take_action(action, action_type="ee")
+    return _finish()
+
+
 def bind_robotwin_action_type(venv: Any, action_type: str) -> int:
-    """Make every RoboTwin sub-environment execute actions as ``action_type``.
+    """Make every RoboTwin sub-environment execute chunks as ``action_type``.
 
     RoboTwin's ``VectorEnv.step`` forwards a chunk to
-    ``task.gen_sparse_reward_data(chunk_actions)`` without an ``action_type``,
-    so the task falls back to 14-D joint targets. The task method itself
-    accepts ``action_type="ee"`` (16-D ``xyz+quat_xyzw+gripper`` per arm), so
-    bind it on each task instance. Idempotent; returns how many tasks were
-    (re)bound, which is also what a test can assert on.
+    ``task.gen_sparse_reward_data(chunk_actions)``, which only understands
+    14-D joint targets. For ``"ee"`` that entry point is replaced on each task
+    instance by :func:`execute_robotwin_ee_chunk`; ``"qpos"`` restores the
+    original method. Idempotent; returns how many tasks were (re)bound.
     """
     if action_type not in ("qpos", "ee"):
         raise ValueError(f"Unsupported RoboTwin action_type {action_type!r}")
@@ -93,9 +138,12 @@ def bind_robotwin_action_type(venv: Any, action_type: str) -> int:
         if original is None:
             original = task.gen_sparse_reward_data
             task._rlinf_original_gen_sparse_reward_data = original
-        task.gen_sparse_reward_data = functools.partial(
-            original, action_type=action_type
-        )
+        if action_type == "ee":
+            task.gen_sparse_reward_data = functools.partial(
+                execute_robotwin_ee_chunk, task
+            )
+        else:
+            task.gen_sparse_reward_data = original
         setattr(task, _ACTION_TYPE_MARKER, action_type)
         bound += 1
     return bound

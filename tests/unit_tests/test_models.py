@@ -1309,6 +1309,7 @@ def test_prepare_actions_robotwin_requires_openwam_representation():
 def test_robotwin_env_eef_proprio_and_action_type_binding():
     from rlinf.envs.sim.robotwin.robotwin_env import (
         bind_robotwin_action_type,
+        execute_robotwin_ee_chunk,
         robotwin_task_eef20_proprio,
     )
 
@@ -1320,17 +1321,30 @@ def test_robotwin_env_eef_proprio_and_action_type_binding():
             return np.array([0.75])
 
     class _Task:
-        def __init__(self):
+        def __init__(self, succeed_at=None, step_lim=8):
             self.robot = _Robot()
             self.calls = []
+            self.take_action_cnt = 0
+            self.step_lim = step_lim
+            self.eval_success = False
+            self._succeed_at = succeed_at
 
         def get_arm_pose(self, arm):
             pose = [0.1, 0.2, 0.3, 0.0, 0.0, 0.0, 1.0]
             return pose if arm == "left" else [-p for p in pose[:3]] + pose[3:]
 
         def gen_sparse_reward_data(self, chunk_actions, action_type="qpos"):
-            self.calls.append((chunk_actions.shape, action_type))
+            self.calls.append(("chunk", chunk_actions.shape, action_type))
             return None
+
+        def take_action(self, action, action_type="qpos"):
+            self.calls.append(("step", tuple(action.shape), action_type))
+            self.take_action_cnt += 1
+            if (
+                self._succeed_at is not None
+                and self.take_action_cnt >= self._succeed_at
+            ):
+                self.eval_success = True
 
     task = _Task()
     proprio = robotwin_task_eef20_proprio(task)
@@ -1345,12 +1359,40 @@ def test_robotwin_env_eef_proprio_and_action_type_binding():
     )
     assert bind_robotwin_action_type(venv, "ee") == 2
     assert bind_robotwin_action_type(venv, "ee") == 0  # idempotent
-    venv.envs[0].task.gen_sparse_reward_data(np.zeros((32, 16)))
-    assert task.calls == [((32, 16), "ee")]
-    # Switching back restores joint control on the same original method.
+    # VectorEnv.step calls gen_sparse_reward_data(chunk): the ee binding replays
+    # the chunk through take_action(..., action_type="ee") one target at a time.
+    reward, term, trunc, infos = venv.envs[0].task.gen_sparse_reward_data(
+        np.zeros((4, 16))
+    )
+    assert task.calls == [("step", (16,), "ee")] * 4
+    assert (reward.item(), term.item(), trunc.item(), infos["success"]) == (
+        0,
+        0,
+        0,
+        False,
+    )
+    # Reaching step_lim truncates; further chunks are not executed.
+    reward, term, trunc, infos = task.gen_sparse_reward_data(np.zeros((6, 16)))
+    assert task.take_action_cnt == 8 and trunc.item() == 1 and term.item() == 0
+    assert len(task.calls) == 8
+    assert task.gen_sparse_reward_data(np.zeros((2, 16)))[2].item() == 1
+    assert len(task.calls) == 8
+    # Success mid-chunk stops the chunk and pays the sparse reward.
+    winner = _Task(succeed_at=3, step_lim=100)
+    reward, term, trunc, infos = execute_robotwin_ee_chunk(winner, np.zeros((10, 16)))
+    assert winner.take_action_cnt == 3
+    assert (reward.item(), term.item(), trunc.item(), infos["success"]) == (
+        1,
+        1,
+        0,
+        True,
+    )
+    with pytest.raises(ValueError, match="16-D actions"):
+        execute_robotwin_ee_chunk(_Task(), np.zeros((2, 14)))
+    # Switching back restores the original joint-space entry point.
     assert bind_robotwin_action_type(venv, "qpos") == 2
     venv.envs[0].task.gen_sparse_reward_data(np.zeros((4, 14)))
-    assert task.calls[-1] == ((4, 14), "qpos")
+    assert task.calls[-1] == ("chunk", (4, 14), "qpos")
     with pytest.raises(ValueError, match="Unsupported RoboTwin action_type"):
         bind_robotwin_action_type(venv, "eef")
 
