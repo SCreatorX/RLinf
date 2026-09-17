@@ -27,7 +27,8 @@ def get_model(cfg: DictConfig, torch_dtype: torch.dtype | None = None) -> OpenWA
     model_path = cfg.get("model_path")
     if not model_path:
         raise ValueError("OpenWAM requires actor.model.model_path to be set.")
-    return OpenWAMPolicy.from_checkpoint(
+    openwam_cfg = cfg.get("openwam", {}) or {}
+    model = OpenWAMPolicy.from_checkpoint(
         model_path=str(model_path),
         ckpt_name=cfg.get("ckpt_name"),
         device=str(cfg.get("device", "cuda")),
@@ -49,6 +50,14 @@ def get_model(cfg: DictConfig, torch_dtype: torch.dtype | None = None) -> OpenWA
             else None
         ),
     )
+    # The PPO value head always exists so rollout can score values and exported
+    # checkpoints stay uniform, but it only trains under RL. SFT and eval keep
+    # it frozen: otherwise FSDP's optimizer builds a critic parameter group and
+    # demands ``actor.optim.value_lr`` from recipes that never mention a critic.
+    if not bool(openwam_cfg.get("rl_enabled", False)):
+        for parameter in model.value_head.parameters():
+            parameter.requires_grad_(False)
+    return model
 
 
 __all__ = ["OpenWAMPolicy", "get_model"]
