@@ -1432,6 +1432,54 @@ def test_env_output_keeps_native_proprio():
     assert without["obs"]["native_proprio"] is None
 
 
+def test_step_robotwin_venv_uses_caller_timeout():
+    import time
+    from concurrent.futures import ThreadPoolExecutor
+
+    from rlinf.envs.sim.robotwin.robotwin_env import step_robotwin_venv
+
+    class _Sub:
+        def __init__(self, delay, fail=False):
+            self.delay, self.fail = delay, fail
+
+        def step(self, action):
+            time.sleep(self.delay)
+            if self.fail:
+                raise ValueError("boom")
+            return {
+                "obs": {"a": float(action[0])},
+                "reward": 0.0,
+                "terminated": 0,
+                "truncated": 0,
+                "info": {},
+            }
+
+    def transform(results):
+        return tuple(
+            [r[k] for r in results]
+            for k in ("obs", "reward", "terminated", "truncated", "info")
+        )
+
+    venv = SimpleNamespace(
+        envs=[_Sub(0.2), _Sub(0.0)],
+        env_thread_pool=ThreadPoolExecutor(2),
+        transform=transform,
+    )
+    obs, *_ = step_robotwin_venv(venv, np.array([[1.0], [2.0]]), timeout_s=None)
+    assert [o["a"] for o in obs] == [1.0, 2.0]
+    with pytest.raises(RuntimeError, match="SubEnv 0 step error: TimeoutError"):
+        step_robotwin_venv(venv, np.array([[1.0], [2.0]]), timeout_s=0.01)
+    venv.envs[1] = _Sub(0.0, fail=True)
+    with pytest.raises(RuntimeError, match="SubEnv 1 step error: ValueError: boom"):
+        step_robotwin_venv(venv, np.array([[1.0], [2.0]]), timeout_s=5)
+    # Without the thread-pool attributes the call defers to venv.step.
+    plain = SimpleNamespace(step=lambda actions: ("stepped", actions.shape))
+    assert step_robotwin_venv(plain, np.zeros((2, 16)), timeout_s=None) == (
+        "stepped",
+        (2, 16),
+    )
+
+
 def test_openwam_prompt_template_follows_dataset_type():
     from rlinf.models.embodiment.openwam.openwam_policy import (
         ROBOTWIN_PROMPT_PREFIX,

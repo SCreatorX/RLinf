@@ -118,6 +118,34 @@ def execute_robotwin_ee_chunk(task: Any, chunk_actions: Any):
     return _finish()
 
 
+def step_robotwin_venv(venv: Any, actions: Any, timeout_s: float | None):
+    """``VectorEnv.step`` with a configurable per-sub-environment timeout.
+
+    RoboTwin's ``VectorEnv.step`` waits ``future.result(timeout=120)`` on each
+    sub-environment. End-effector chunks are planned target by target, and a
+    few hard targets make the motion planner retry for tens of seconds, so a
+    32-step chunk can legitimately exceed two minutes; the resulting
+    ``TimeoutError`` surfaces as an empty "SubEnv i step error". Re-implement the
+    fan-out with the caller's budget (``None`` waits indefinitely). Falls back
+    to ``venv.step`` when the VectorEnv does not expose its thread pool.
+    """
+    envs = getattr(venv, "envs", None)
+    pool = getattr(venv, "env_thread_pool", None)
+    transform = getattr(venv, "transform", None)
+    if not envs or pool is None or transform is None:
+        return venv.step(actions)
+    futures = [pool.submit(env.step, actions[i]) for i, env in enumerate(envs)]
+    results = []
+    for index, future in enumerate(futures):
+        try:
+            results.append(future.result(timeout=timeout_s))
+        except Exception as exc:  # noqa: BLE001 - mirror VectorEnv's reporting
+            raise RuntimeError(
+                f"SubEnv {index} step error: {type(exc).__name__}: {exc}"
+            ) from exc
+    return transform(results)
+
+
 def bind_robotwin_action_type(venv: Any, action_type: str) -> int:
     """Make every RoboTwin sub-environment execute chunks as ``action_type``.
 
@@ -203,6 +231,10 @@ class RoboTwinEnv(gym.Env):
         self.robotwin_action_type = (
             "ee" if self.openwam_action_representation is not None else "qpos"
         )
+        # Per-chunk wait for one sub-environment; null waits indefinitely. Only
+        # used for ee control, joint chunks keep VectorEnv's own 120 s.
+        timeout = cfg.get("robotwin_step_timeout_s", 1800)
+        self.robotwin_step_timeout_s = None if timeout is None else float(timeout)
         self._init_reset_state_ids()
 
         self._init_env()
@@ -230,6 +262,11 @@ class RoboTwinEnv(gym.Env):
             env_seeds=env_seeds,
         )
         self._bind_action_type()
+
+    def _venv_step(self, actions):
+        if self.robotwin_action_type == "ee":
+            return step_robotwin_venv(self.venv, actions, self.robotwin_step_timeout_s)
+        return self.venv.step(actions)
 
     def _bind_action_type(self) -> None:
         """(Re)bind the controller mode; sub-envs are rebuilt after ``close()``."""
@@ -466,7 +503,7 @@ class RoboTwinEnv(gym.Env):
             actions = actions[:, None, :]
 
         self._bind_action_type()
-        raw_obs, step_reward, terminations, truncations, info_list = self.venv.step(
+        raw_obs, step_reward, terminations, truncations, info_list = self._venv_step(
             actions
         )
         extracted_obs = self._extract_obs_image(raw_obs)
@@ -522,7 +559,7 @@ class RoboTwinEnv(gym.Env):
         infos_list = []
 
         self._bind_action_type()
-        raw_obs, step_reward, terminations, truncations, info_list = self.venv.step(
+        raw_obs, step_reward, terminations, truncations, info_list = self._venv_step(
             chunk_actions
         )
         extracted_obs = self._extract_obs_image(raw_obs)
