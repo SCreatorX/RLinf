@@ -1218,17 +1218,22 @@ def _make_rlinf_checkpoint(tmp_path: Path, extra: dict | None = None) -> Path:
     return step_dir
 
 
-@pytest.mark.parametrize(
-    ("name", "task", "steps"),
-    [
-        ("robotwin_click_bell_openwam_eval", "click_bell", 416),
-        ("robotwin_place_empty_cup_openwam_eval", "place_empty_cup", 224),
-    ],
+_ROBOTWIN_RECIPES = sorted(
+    path.stem
+    for path in (Path(__file__).resolve().parents[2] / "evaluations/robotwin").glob(
+        "robotwin_*_openwam_eval.yaml"
+    )
 )
-def test_openwam_robotwin_eval_recipes_validate(openwam_eval_recipe, name, task, steps):
-    """RoboTwin recipes switch the env to EEF control and publish endposes."""
-    from rlinf.config import validate_cfg
 
+
+@pytest.mark.parametrize("name", _ROBOTWIN_RECIPES)
+def test_openwam_robotwin_eval_recipes_validate(openwam_eval_recipe, name):
+    """Every generated RoboTwin recipe switches the env to EEF control."""
+    from rlinf.config import validate_cfg
+    from toolkits.openwam.gen_robotwin_eval_recipes import STEP_LIMITS, rounded_steps
+
+    task = name[len("robotwin_") : -len("_openwam_eval")]
+    assert task in STEP_LIMITS
     cfg = openwam_eval_recipe(name, subdir="robotwin")
     cfg.runner.task_type = "embodied_eval"
     cfg = validate_cfg(cfg)
@@ -1240,10 +1245,19 @@ def test_openwam_robotwin_eval_recipes_validate(openwam_eval_recipe, name, task,
     assert env.task_config.camera.collect_wrist_camera is True
     assert list(env.task_config.embodiment) == ["aloha-agilex"]
     assert env.center_crop is False
+    steps = rounded_steps(STEP_LIMITS[task])
     assert env.max_episode_steps == env.task_config.step_lim == steps
-    assert env.max_steps_per_rollout_epoch % cfg.rollout.model.num_action_chunks == 0
+    assert steps % cfg.rollout.model.num_action_chunks == 0
     assert cfg.rollout.model.action_dim == 20
     assert cfg.rollout.model.openwam.inference_horizon is None
+
+
+def test_openwam_robotwin_recipe_generator_covers_all_tasks():
+    from toolkits.openwam.gen_robotwin_eval_recipes import STEP_LIMITS, rounded_steps
+
+    assert len(STEP_LIMITS) == 50 and len(_ROBOTWIN_RECIPES) == 50
+    assert {f"robotwin_{t}_openwam_eval" for t in STEP_LIMITS} == set(_ROBOTWIN_RECIPES)
+    assert rounded_steps(400) == 416 and rounded_steps(512) == 512
 
 
 def test_openwam_eef20_to_robotwin_ee16_layout():
