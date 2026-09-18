@@ -100,7 +100,7 @@ rollout:
 
   model:
     model_type: "openwam"
-    model_path: "/mnt/data/wangyuran/openwam_checkpoints/new-openwam-libero-sft-10epoch-delta-aligned"
+    model_path: "/path/to/openwam-libero-sft-delta-aligned"
     precision: bf16
     device: cuda
     is_lora: false
@@ -123,7 +123,7 @@ actor:
 
   model:
     model_type: "openwam"
-    model_path: "/mnt/data/wangyuran/openwam_checkpoints/new-openwam-libero-sft-10epoch-delta-aligned"
+    model_path: "/path/to/openwam-libero-sft-delta-aligned"
     precision: bf16
     device: cuda
     is_lora: false

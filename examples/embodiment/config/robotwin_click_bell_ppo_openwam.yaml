@@ -131,7 +131,7 @@ rollout:
 
   model:
     model_type: "openwam"
-    model_path: "/mnt/data/wangyuran/openwam_checkpoints/OpenWAM_Study_Checkpoints/architecture_study/robotwin_dual_system_joint_self_attention"
+    model_path: "/path/to/openwam-robotwin-checkpoint"
     precision: bf16
     device: cuda
     is_lora: false
@@ -154,7 +154,7 @@ actor:
 
   model:
     model_type: "openwam"
-    model_path: "/mnt/data/wangyuran/openwam_checkpoints/OpenWAM_Study_Checkpoints/architecture_study/robotwin_dual_system_joint_self_attention"
+    model_path: "/path/to/openwam-robotwin-checkpoint"
     precision: bf16
     device: cuda
     is_lora: false
