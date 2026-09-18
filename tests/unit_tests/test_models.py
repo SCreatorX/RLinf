@@ -1654,12 +1654,14 @@ def test_openwam_get_model_honors_load_to_device(monkeypatch, openwam_recipe):
     """SFT builds the policy on the CPU for FSDP; rollout loads straight to the device."""
     from rlinf.models.embodiment import openwam as openwam_module
 
-    seen = []
+    seen, retargets = [], []
 
     def fake_from_checkpoint(cls, **kwargs):
         seen.append(kwargs)
         policy = torch.nn.Module()
         policy.value_head = torch.nn.Linear(8, 1)
+        policy.retarget_runtime_device = MagicMock()
+        retargets.append(policy.retarget_runtime_device)
         return policy
 
     monkeypatch.setattr(
@@ -1680,17 +1682,30 @@ def test_openwam_get_model_honors_load_to_device(monkeypatch, openwam_recipe):
     assert [call["device"] for call in seen] == ["cpu", "cuda:1"]
     assert seen[0]["inference_horizon"] == 10
     assert seen[0]["torch_dtype"] == torch.bfloat16
-    # PPO recipes keep load_to_device: true: the HuggingFace rollout worker
-    # builds its policy from the shared actor.model config and never moves it.
-    for name in (
-        "libero_spatial_ppo_openwam",
-        "libero_spatial_ppo_openwam_smoke",
-        "libero_spatial_ppo_openwam_long",
-        "robotwin_click_bell_ppo_openwam",
-    ):
-        recipe = openwam_recipe(name)
-        assert recipe.actor.model.load_to_device is True, name
-        assert recipe.rollout.model.load_to_device is True, name
+    # The CPU-built policy still prepares inputs on the accelerator FSDP uses.
+    retargets[0].assert_called_once_with(torch.device("cuda:1"))
+    retargets[1].assert_not_called()
+
+
+def test_openwam_retarget_runtime_device_updates_cached_devices():
+    """Retargeting rewrites OpenWAM's cached devices and leaves weights alone."""
+    video = SimpleNamespace(_device=torch.device("cpu"))
+    architecture = SimpleNamespace(
+        action_dim=10,
+        _device=torch.device("cpu"),
+        backbones={"video": video, "vlm": SimpleNamespace()},
+    )
+    policy = OpenWAMPolicy(
+        SimpleNamespace(architecture=architecture),
+        num_frames=33,
+        height=8,
+        width=8,
+        denoise_steps=2,
+    )
+    policy.retarget_runtime_device("cuda:3")
+    assert architecture._device == torch.device("cuda:3")
+    assert video._device == torch.device("cuda:3")
+    assert not hasattr(architecture.backbones["vlm"], "_device")
 
 
 def _openwam_fake_dataset_cfg(tmp_path, monkeypatch, lengths):
