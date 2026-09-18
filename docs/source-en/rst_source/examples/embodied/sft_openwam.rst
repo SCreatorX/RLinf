@@ -73,13 +73,14 @@ Evaluation
 
 The LIBERO evaluation recipe uses the same checkpoint contract as this recipe. OpenWAM checkpoints trained on the canonical LIBERO bucket emit absolute EEF10 goals; RLinf converts each goal against the current achieved pose before sending the 7-D OSC command.
 
-Run a short two-environment smoke test after setting ``MUJOCO_GL=egl`` and ``PYOPENGL_PLATFORM=egl``. The checked-in recipe places the env worker and rollout worker on separate GPUs so EGL rendering does not share a GPU with OpenWAM inference:
+Run the short smoke recipe (one environment, 30 steps, i.e. three 10-step generations) after setting ``MUJOCO_GL=egl`` and ``PYOPENGL_PLATFORM=egl``. The recipes place the env worker and rollout worker on separate GPUs so EGL rendering does not share a GPU with OpenWAM inference:
 
-.. code:: bash
+.. code-block:: bash
 
-   python evaluations/eval_embodied_agent.py \\
-     --config-path libero --config-name libero_spatial_openwam_eval \\
-     env.eval.max_steps_per_rollout_epoch=32 env.eval.max_episode_steps=32
+   python evaluations/eval_embodied_agent.py \
+     --config-path ../tests/e2e_tests/evaluations --config-name libero_spatial_openwam_eval
+
+Keep ``env.eval.max_steps_per_rollout_epoch`` divisible by ``rollout.model.num_action_chunks`` (10 with the default ``openwam.inference_horizon``) when you shorten a recipe.
 
 For a checkpoint trained with native delta EEF10 actions, set ``env.eval.openwam_action_representation=native_delta_eef10``. Keep this value aligned with the dataset metadata and checkpoint used for evaluation.
 

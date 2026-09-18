@@ -73,13 +73,14 @@ checkpoint 会把 dataloader、sampler（含 shuffle 的 epoch）和随机数状
 
 LIBERO 评估配方与本配方使用同一套 checkpoint 约定。按标准 LIBERO 数据训练的 OpenWAM checkpoint 输出绝对 EEF10 目标位姿；RLinf 会在每个环境 step 根据当前实际位姿计算目标差值，再发送 7D OSC 动作。
 
-设置 ``MUJOCO_GL=egl`` 和 ``PYOPENGL_PLATFORM=egl`` 后，可以先运行双环境 32 步 smoke test。当前配方将 env worker 与 rollout worker 分到不同 GPU，避免 EGL 渲染和 OpenWAM 推理争用同一张卡：
+设置 ``MUJOCO_GL=egl`` 和 ``PYOPENGL_PLATFORM=egl`` 后，可以先运行 smoke 配方（1 个环境、30 步，即三次 10 步生成）。配方把 env worker 与 rollout worker 分到不同 GPU，避免 EGL 渲染和 OpenWAM 推理争用同一张卡：
 
-.. code:: bash
+.. code-block:: bash
 
-   python evaluations/eval_embodied_agent.py \\
-     --config-path libero --config-name libero_spatial_openwam_eval \\
-     env.eval.max_steps_per_rollout_epoch=32 env.eval.max_episode_steps=32
+   python evaluations/eval_embodied_agent.py \
+     --config-path ../tests/e2e_tests/evaluations --config-name libero_spatial_openwam_eval
+
+自行缩短配方时，``env.eval.max_steps_per_rollout_epoch`` 必须能被 ``rollout.model.num_action_chunks``（默认 ``openwam.inference_horizon`` 下为 10）整除。
 
 如果 checkpoint 使用 native delta EEF10 动作训练，将 ``env.eval.openwam_action_representation`` 改为 ``native_delta_eef10``，并确保它与数据 metadata 和评估 checkpoint 一致。
 
