@@ -1112,7 +1112,7 @@ def test_delay_metrics_report_every_sample():
     assert env.insert_delay_metrics().numel() == 0
 
 
-# --- OpenWAM PPO checkpoint export -----------------------------------------
+# --- OpenWAM checkpoint export ---------------------------------------------
 
 
 def _make_source(tmp_path: Path) -> Path:
