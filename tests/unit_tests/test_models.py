@@ -1685,6 +1685,17 @@ def test_openwam_get_model_honors_load_to_device(monkeypatch, openwam_recipe):
     # The CPU-built policy still prepares inputs on the accelerator FSDP uses.
     retargets[0].assert_called_once_with(torch.device("cuda:1"))
     retargets[1].assert_not_called()
+    # PPO recipes keep load_to_device: true: the HuggingFace rollout worker
+    # builds its policy from the shared actor.model config and never moves it.
+    for name in (
+        "libero_spatial_ppo_openwam",
+        "libero_spatial_ppo_openwam_smoke",
+        "libero_spatial_ppo_openwam_long",
+        "robotwin_click_bell_ppo_openwam",
+    ):
+        recipe = openwam_recipe(name)
+        assert recipe.actor.model.load_to_device is True, name
+        assert recipe.rollout.model.load_to_device is True, name
 
 
 def test_openwam_retarget_runtime_device_updates_cached_devices():
