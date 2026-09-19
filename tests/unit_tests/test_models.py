@@ -42,7 +42,6 @@ from rlinf.models.embodiment.base_policy import ForwardType
 from rlinf.models.embodiment.modules.rlt_token_transformer import (
     RLTTokenTransformer,
 )
-from rlinf.scheduler import Worker
 from rlinf.models.embodiment.openwam.openwam_policy import (
     OpenWAMPolicy,
     _batch_value,
@@ -51,6 +50,7 @@ from rlinf.models.embodiment.openwam.openwam_policy import (
     _libero_state_to_eef10,
     _to_pil,
 )
+from rlinf.scheduler import Worker
 from rlinf.utils.env_helpers import HistoryManager
 from rlinf.utils.env_helpers.delay_sampler import (
     ConstantDelaySampler,
